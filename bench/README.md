@@ -42,6 +42,8 @@ repo (the original prompt was replaced). The other six prompts are the same; exp
   check the server's running list and recent requests before starting.
 - **Environment variables leak between arms** if you run A and B from one PowerShell session. Start each arm clean.
   (PowerShell variable names are also case-insensitive: `$t` and `$T` are the same variable.)
+- **Leave memory headroom.** A config that "fits" with a card at its memory limit can be ~3x slower than the next
+  smaller one (Strata prompt chunk 10240 vs 8192).
 - **Watch host RAM during loads.** A config that does not fit can silently spill GPU allocations into system RAM
   (see [../hardware-and-windows-notes.md](../hardware-and-windows-notes.md)). I run every test server under a guard
   that kills it when available RAM drops below ~10 GB.

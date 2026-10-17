@@ -8,6 +8,8 @@ changed and when.
   85.3% (reference UD-Q4_K_XL).
 - New best Strata setup: IQ3_S, 2 cards, 1 x 200k, int8 KV, prefill chunk 8192, JIT: decode 97.6 tok/s (+61% vs
   llama.cpp on 4 cards), prompt read 1,415 tok/s at 33.6k (1.9x), decode after it 64.9 (2.3x). IQ3_XXS superseded.
+- Strata prompt chunk sweep (IQ3_S, 1 x 200k): 8192 kept (1,417 tok/s at 33.6k; 112k-token prompt at 1,433 tok/s,
+  decode after 72.2); 10240 sits at card 1's memory limit and runs ~3x slower; 12288 does not fit.
 - `STRATA_NIGHT_PREFILL_GROUPED` must be 0 for IQ3_S (unsupported type); prompt chunk 4k -> 8k: 881 -> 1,415 tok/s.
 
 ## 2026-10-16 (late)

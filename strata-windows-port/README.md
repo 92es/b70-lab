@@ -71,6 +71,28 @@ it replaced IQ3_XXS.
   error "card 0 gate/up type 23", then a restart). IQ3_XXS needs it **on** (off: prompt read 239 tok/s).
 - Prompt chunk size matters a lot: IQ3_S with 4k chunks 881 tok/s, with 8k chunks 1,415 tok/s.
 - IQ3_S at 2 x 200k and 2 x 131k does not fit on two 32 GB cards; 1 x 200k and 2 x 112k do.
+
+## Prompt chunk size sweep (IQ3_S)
+
+IQ3_S, 1 x 200k, int8 KV, JIT build, 2 cards, driver 8976; `--prefill` = prompt chunk in tokens; same 7-prompt set,
+one round each. "Free" = what the engine reported free on the fuller card after loading.
+
+| `--prefill` | Fits | Decode tok/s | Prompt read @ 33.6k | Decode after it |
+|---|---|---|---|---|
+| 6144 | yes (1,851 MiB free) | 102.3 | 1,247 | 70.7 |
+| 7168 | yes (1,835 MiB) | 98.4 | 1,435 | 54.1 |
+| **8192 (kept)** | yes (1,815 MiB) | 99.0 | 1,417 | 65.7 |
+| 10240 | barely (1,778 MiB) | 35.8 | 517 | 26.2 |
+| 12288 | no (card 1 needs 30.46 of 30.16 GiB) | - | - | - |
+
+At 10240 card 1 sits at its memory limit and everything slows ~3x. Decode-after numbers vary about +-8 tok/s run to
+run.
+
+Long prompt with 8192: **112,142 tokens read in 78.3 s = 1,433 tok/s**, decode after it 72.2 tok/s. For comparison,
+the llama.cpp fork (Flash-Next MTP, 4 cards, cross-card pipeline) read an ~87k prompt at ~685 tok/s.
+
+**Lesson:** leave memory headroom. A config that "fits" with a card at its limit can be 3x slower than one step
+smaller.
 fp16 KV fits 96k context on two cards (1.6 GB free); 131k does not (card 1 ~0.85 GB short).
 
 **Lesson:** a speed number only counts after an answer check. The broken AOT build looked fast (96.6 tok/s) because
