@@ -67,7 +67,8 @@ Same 7-prompt set (`bench/sbench.py`), temperature 0, thinking off, 2026-10-16:
 | Setup | Answers | Decode | Prompt read | Decode after long prompt |
 |---|---|---|---|---|
 | llama.cpp r62, 4 cards, UD-Q4_K_XL | correct | 60.6 | 748 tok/s @ 33.6k | 28.6 |
-| Strata (Windows port), 2 cards, IQ3_XXS, int8 KV, JIT build, 200k | correct | 108.2 | 599 tok/s @ 33.6k | 58.7 |
+| Strata (Windows port), 2 cards, IQ3_S, int8 KV, JIT build, 1 x 200k | correct | 97.6 | 1,415 tok/s @ 33.6k | 64.9 |
+| Strata, IQ3_XXS, 2 x 200k (superseded) | correct | 108.2 | 599 tok/s @ 33.6k | 58.7 |
 | Strata, same, fp16 KV, 32k (superseded) | correct | 67.4 | 570 tok/s @ 26.8k | 46.4 |
 
 See [../strata-windows-port/](../strata-windows-port/). Note the Strata run uses a smaller quant and half the cards.

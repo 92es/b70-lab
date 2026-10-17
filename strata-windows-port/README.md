@@ -5,10 +5,10 @@ parallel, MTP, int8 KV). It targets Linux. These three patches make it build and
 Intel's `icx` compiler, including two-card expert parallel and int8 KV.
 
 - Base: `hotschmoe/Strata` branch `b70-night-20261016` @ `1c360526` (from SergiioB/b70-launcher PR #4).
-- Model: ISTA-DASLab GSQ-RCO IQ3_XXS quant of Qwen3.8-Flash-Next (sha256 checked); pack + MTP built on the same
-  machine. Cards: two B70s (`level_zero:2,3`).
-- Status (2026-10-16): **works with int8 KV, 200k context x 2 slots, 2 cards, when built JIT** (patch 0003).
-  108.2 tok/s decode, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
+- Model: ISTA-DASLab GSQ-RCO quants of Qwen3.8-Flash-Next, **IQ3_S** (84 GB, current) and IQ3_XXS (76 GB, earlier),
+  sha256 checked; packs + MTP built on the same machine. Cards: two B70s (`level_zero:2,3`).
+- Status (2026-10-17): **best setup = IQ3_S, 1 slot x 200k context, int8 KV, prefill chunk 8192, JIT build**
+  (patch 0003): decode 97.6 tok/s, prompt read 1,415 tok/s at 33.6k, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
   Not done: soak test, concurrent requests on both slots, AOT with oneAPI 2026.1.
 
 Patches (prepared with AI assistance; Strata is MIT, notice in
@@ -20,8 +20,8 @@ Patches (prepared with AI assistance; Strata is MIT, notice in
 | `0002` two-card expert parallel through host memory | every GPU shares one `sycl::context`; the shared expert-parallel regions are host USM in that context (one address for both cards). `STRATA_WIN_SHARED_CONTEXT=0` restores one context per device |
 | `0003` JIT build option for Xe2 | `STRATA_SYCL_XE2_JIT=ON` makes a JIT build define `STRATA_XMX_SG16` like the bmg AOT build does; `STRATA_SYCL_AOT_OPTIONS` passes extra ocloc options to an AOT build; `setenv` shim for two parity tests |
 
-`configs/` has the engine configs used below (paths replaced with placeholders): `strata-ep2-jit.json` (the working
-int8 setup), `strata-ep2-int8-32k.json`, `strata-ep2-fp16-96k.json`.
+`configs/` has the engine configs used below (paths replaced with placeholders): `strata-iq3s-200k1-pf8k.json` (the
+current best setup), `strata-ep2-jit.json` (IQ3_XXS, int8, 2 x 200k), `strata-ep2-int8-32k.json`, `strata-ep2-fp16-96k.json`.
 
 ## Build (JIT)
 
@@ -42,13 +42,35 @@ Strata rows: 2 cards, MTP speculative decoding depth 4.
 | Setup | Answers | Decode tok/s | Prompt read | Decode after long prompt |
 |---|---|---|---|---|
 | llama.cpp fork r62, 4 cards, UD-Q4_K_XL | correct | 60.6 | 748 tok/s @ 33.6k | 28.6 |
-| **Strata, int8 KV, 200k x 2 slots, JIT build** | **correct** (identical to llama.cpp on 4 check prompts) | **108.2 (+79%)** | 599 tok/s @ 33.6k (-20%) | **58.7 (2.0x)** |
+| **Strata IQ3_S, int8 KV, 1 x 200k, prefill 8192, JIT** | **correct** | **97.6 (+61%)** | **1,415 tok/s @ 33.6k (1.9x)** | **64.9 (2.3x)** |
+| Strata IQ3_S, int8 KV, 2 x 112k, prefill 4096, JIT | correct | 100.8 | 881 tok/s @ 33.6k | 60.7 |
+| Strata IQ3_XXS, int8 KV, 2 x 200k, prefill 12288, JIT (superseded by IQ3_S) | correct (identical to llama.cpp on 4 check prompts) | 108.2 (97.7 on a rerun) | 599-678 tok/s @ 33.6k | 58.4-58.7 |
 | Strata, fp16 KV, 32k (superseded) | correct | 67.4 (+11%) | 570 tok/s @ 26.8k | 46.4 |
 | Strata, int8 KV, 200k, AOT build (oneAPI 2026.0) | **wrong** (garbage) | 96.6 (invalid) | 682 @ 33.6k | 66.6 (invalid) |
 | Strata, 1 card, int8 KV, AOT build | wrong | 12-20 | - | - |
 
-The quants differ: IQ3_XXS (Strata) is smaller than UD-Q4_K_XL (llama.cpp). On the 4 check prompts
+The quants differ: Strata runs GSQ-RCO IQ3_S / IQ3_XXS, llama.cpp runs UD-Q4_K_XL. On the 4 check prompts
 (`bench/squal.py`) the answers matched llama.cpp.
+
+## Quant quality (IQ3_S vs IQ3_XXS)
+
+Measured in llama.cpp (fork r62), 30 x 512-token chunks, KL divergence against UD-Q4_K_XL as the reference:
+
+| Quant | Perplexity vs Q4 | Mean KLD | Median KLD | Same top token |
+|---|---|---|---|---|
+| GSQ-RCO IQ3_XXS (76 GB) | +3.5% +- 0.9% | 0.211 | 0.046 | 85.3% |
+| **GSQ-RCO IQ3_S (84 GB)** | **+1.0% +- 0.7%** | **0.131** | **0.025** | **88.4%** |
+
+The reference is itself a quant from a different family, so these KLD values overstate the distance to full
+precision. IQ3_S is closer to the reference, reads prompts faster in Strata, and decodes ~7-10% slower than IQ3_XXS;
+it replaced IQ3_XXS.
+
+## Strata settings that matter
+
+- `STRATA_NIGHT_PREFILL_GROUPED` must be **0 for IQ3_S**: the grouped prefill kernel does not support it (engine
+  error "card 0 gate/up type 23", then a restart). IQ3_XXS needs it **on** (off: prompt read 239 tok/s).
+- Prompt chunk size matters a lot: IQ3_S with 4k chunks 881 tok/s, with 8k chunks 1,415 tok/s.
+- IQ3_S at 2 x 200k and 2 x 131k does not fit on two 32 GB cards; 1 x 200k and 2 x 112k do.
 fp16 KV fits 96k context on two cards (1.6 GB free); 131k does not (card 1 ~0.85 GB short).
 
 **Lesson:** a speed number only counts after an answer check. The broken AOT build looked fast (96.6 tok/s) because

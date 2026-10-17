@@ -3,6 +3,13 @@
 Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topic folder; this file records what
 changed and when.
 
+## 2026-10-17
+- Quant quality: GSQ-RCO IQ3_S perplexity +1.0% / mean KLD 0.131 / same top token 88.4% vs IQ3_XXS +3.5% / 0.211 /
+  85.3% (reference UD-Q4_K_XL).
+- New best Strata setup: IQ3_S, 2 cards, 1 x 200k, int8 KV, prefill chunk 8192, JIT: decode 97.6 tok/s (+61% vs
+  llama.cpp on 4 cards), prompt read 1,415 tok/s at 33.6k (1.9x), decode after it 64.9 (2.3x). IQ3_XXS superseded.
+- `STRATA_NIGHT_PREFILL_GROUPED` must be 0 for IQ3_S (unsupported type); prompt chunk 4k -> 8k: 881 -> 1,415 tok/s.
+
 ## 2026-10-16 (late)
 - Parked plan added: Strata-style expert parallelism for DeepSeek V4 Flash ([plan](deepseek-v4/PLAN-expert-parallel.md)).
 - Strata int8 KV bug on Windows solved: oneAPI 2026.0's AOT build (`ocloc`, `bmg-g31`) miscompiles the batched

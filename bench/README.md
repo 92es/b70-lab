@@ -35,6 +35,9 @@ repo (the original prompt was replaced). The other six prompts are the same; exp
   poisoned the model's recurrent state for later requests. A probe that asks for a first token after a 5-token and a
   45-token prompt (expecting " Paris") caught it.
 - **Draft and no-draft configs behave differently.** Test both when changing the backend.
+- **Check for running jobs before every GPU action on a shared box.** If scheduled jobs or other clients use the same
+  GPU server, check what is running (and when jobs are scheduled) before each load, unload or benchmark; tests here
+  broke a few of their in-flight requests.
 - **Keep other clients off the GPUs.** A model swap by another client wipes the prompt cache and changes timings;
   check the server's running list and recent requests before starting.
 - **Environment variables leak between arms** if you run A and B from one PowerShell session. Start each arm clean.

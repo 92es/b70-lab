@@ -33,7 +33,7 @@ live, staged, rejected or an open bug. [CHANGELOG.md](CHANGELOG.md) has the date
 | [deepseek-v4/](deepseek-v4/) | DeepSeek V4 Flash: IQ2_XS/IQ3_XXS MoE kernel, DSpark drafting, sparse attention at depth | live |
 | [glm-5.3/](glm-5.3/) | GLM-5.3-Flash (321B MoE) brought into the fork: 16.5 -> 24-25 tok/s | live |
 | [gpt-oss/](gpt-oss/) | gpt-oss-120b: MXFP4 reorder, 3-card layer split, cross-card pipeline | live; MXFP4 work merged upstream |
-| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | works: 2 cards, int8 KV, JIT build, 108 tok/s (an AOT miscompile caused the earlier wrong answers) |
+| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | works: 2 cards, IQ3_S, int8 KV, JIT build: 97.6 tok/s decode, 1,415 tok/s prompt read (an AOT miscompile caused the earlier wrong answers) |
 | [reproducers/](reproducers/) | Standalone programs: Level Zero multi-thread submission deadlock, Windows peer-access probe | deadlock still present on driver 8976; not yet reported to Intel |
 | [bench/](bench/) | Benchmark scripts and how to compare fairly | |
 | [rejected-ideas/](rejected-ideas/) | Things that did not help, with numbers | |
