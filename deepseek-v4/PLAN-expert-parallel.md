@@ -1,7 +1,7 @@
 # Plan: Strata-style speed for DeepSeek (updated 2026-10-17)
 
-Status: **Track A planned (parked until step A0)**, **Track B planned (waiting for llama.cpp support)**. No code yet
-and no gain promised until A0 is measured. Results will go into [../STATUS.md](../STATUS.md) as they land.
+Status: **Track A rejected** after step A0 (ceiling 1.12x plain / 1.19x DSpark, see the end of this file).
+**Track B planned** (waiting for llama.cpp support). Results will go into [../STATUS.md](../STATUS.md) as they land.
 
 ## Why
 
@@ -82,3 +82,32 @@ the release claims shorter outputs and better benchmarks.
 - Part of Strata's speed may come from its smaller quant and model-specific fused kernels, not only from parallelism.
 - DeepSeek V4's attention (compressed sparse attention + indexer) and the DSpark draft stay as they are in Track A;
   only the MoE part changes.
+
+## A0 result (2026-10-17): no-go for expert-only parallelism
+
+`GGML_SYCL_PROFILE_OPS=1` (serialized per-op timing, which inflates small ops), fork r52, 7k context, 4 cards, layer
+split, DeepSeek V4 Flash 0731 UD-Q2_K_XL. Per-card analysis; for DSpark only the verify graphs are counted (the
+drafter's small graphs are dropped).
+
+| Op time per step, all 4 cards | Plain decode (102 ms) | DSpark verify (156 ms) |
+|---|---|---|
+| Expert matmuls (`MUL_MAT_ID`) | 14.8 ms = 14% | 33.9 ms = 22% |
+| Dense matmuls (`MUL_MAT`: attention projections, shared experts, indexer) | ~28 ms = 28% | ~45 ms = 29% |
+| Everything else (attention, norms, copies, gathers / sets, concat, ...) | ~58% | ~49% |
+| Ceiling: experts split over 4 cards, zero exchange cost | **1.12x** | **1.19x** |
+| Ceiling over 2 cards | 1.08x | 1.12x |
+
+Both are below the 1.4x go threshold, so Track A as designed is **rejected**.
+
+Why it differs from Flash-Next: DeepSeek V4 Flash's experts are small (2048 wide, low-bit). Per-token time is dominated
+by dense projections and many small ops, not by expert matmuls. Strata's expert-parallel idea does not transfer as is.
+
+What could still pay (not started; each needs its own A0-style measurement):
+- **Dense + expert split per layer (tensor parallel):** ceiling ~1.6x if dense matmuls (29%) and experts (22%) both
+  split 4 ways. But every layer then needs activation all-reduces across cards, and the earlier `-sm tensor` attempt on
+  GLM was sync-bound at 4.8 tok/s. First measure the host-memory all-reduce cost on Windows for 43 layers x 2 per
+  token; it is unmeasured.
+- **Small-op overhead:** half the profiled time is many small ops (inflated by the profiler). Fusion gave Flash-Next
+  only +2-4%; graph capture was 3x slower with MTP's varying shapes.
+- **Track B (V4.1) stands:** it needs llama.cpp support first. Its 384 x 2304 experts are a larger share of the model,
+  so A0 gets re-run on it.

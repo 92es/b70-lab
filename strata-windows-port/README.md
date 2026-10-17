@@ -9,7 +9,7 @@ Intel's `icx` compiler, including two-card expert parallel and int8 KV.
   sha256 checked; packs + MTP built on the same machine. Cards: two B70s (`level_zero:2,3`).
 - Status (2026-10-17): **best setup = IQ3_S, 1 slot x 200k context, int8 KV, prefill chunk 8192, JIT build**
   (patch 0003): decode 97.6 tok/s, prompt read 1,415 tok/s at 33.6k, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
-  Not done: soak test, concurrent requests on both slots, AOT with oneAPI 2026.1.
+  Soak: 2 hours through llama-swap, clean (below). Not done: concurrent requests on two slots, AOT with oneAPI 2026.1.
 
 Patches (prepared with AI assistance; Strata is MIT, notice in
 [../LICENSES/Strata-LICENSE](../LICENSES/Strata-LICENSE)):
@@ -71,6 +71,26 @@ it replaced IQ3_XXS.
   error "card 0 gate/up type 23", then a restart). IQ3_XXS needs it **on** (off: prompt read 239 tok/s).
 - Prompt chunk size matters a lot: IQ3_S with 4k chunks 881 tok/s, with 8k chunks 1,415 tok/s.
 - IQ3_S at 2 x 200k and 2 x 131k does not fit on two 32 GB cards; 1 x 200k and 2 x 112k do.
+
+## 2-hour soak through llama-swap (2026-10-17)
+
+IQ3_S, 1 x 200k, int8 KV, prompt chunk 8192, JIT build, 2 cards, vision on, served through llama-swap. Each cycle:
+fixed-answer checks (JSON, capitals, counting), one vision request with a newly generated picture, and decode on the
+prompt set; every few cycles a 112k-token prompt.
+
+| Measure | Result |
+|---|---|
+| Cycles | 134, 0 errors, 0 engine restarts |
+| Answer checks (JSON / capitals / counting) | 134 / 134 |
+| Vision (new picture each cycle) | 134 / 134, median 4.3 s |
+| Decode | 93.0 tok/s median (92.8-93.2), no drift over 2 hours |
+| 112k-token prompt read (45 runs) | 1,429-1,434 tok/s, decode after it 68.7-69.0 |
+
+One arithmetic question (17*23 + 144/12 = 403) is answered wrong with thinking off by **both** Strata (535) and the
+llama.cpp UD-Q4_K_XL setup (405), and right with thinking on (403) by both: a model trait, not an engine bug.
+
+Vision: a CPU image encoder (`strata-vision`) built from llama.cpp's `mtmd` at the engine's pinned llama.cpp commit,
+with ISTA-DASLab's BF16 mmproj, 24 threads, 300 image tokens per picture.
 
 ## Prompt chunk size sweep (IQ3_S)
 

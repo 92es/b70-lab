@@ -15,6 +15,7 @@ Things that were built or configured, measured, and dropped. Machine: 4x B70 (EP
 | Two server slots (`-np 2`) for Flash-Next | no throughput gain (2 x ~11.5 vs 1 x ~23 tok/s); later device OOM on first request. |
 | Level Zero v1 adapter (`SYCL_UR_USE_LEVEL_ZERO_V2=0`) | DeepSeek V4 decode 19.2 -> 16.0. `UR_L0_USE_IMMEDIATE_COMMANDLISTS` 0/1/2: no effect. |
 | Host flags `--prio 2/3`, `-t 4`, `--cpu-strict` + `-C` mask | no effect on DeepSeek V4. |
+| Expert-only parallelism for DeepSeek V4 Flash 0731 (Strata-style, experts split over 4 cards) | A0 profile, fork r52, 7k context: expert matmuls 14% of decode op time (plain, 102 ms step) / 22% (DSpark verify, 156 ms); dense matmuls ~28-29%; small ops ~50%. Ceiling with zero exchange cost 1.12x / 1.19x (2 cards: 1.08x / 1.12x), below the 1.4x go line. Still open: dense + expert tensor parallel (ceiling ~1.6x, all-reduce cost unmeasured). See [../deepseek-v4/PLAN-expert-parallel.md](../deepseek-v4/PLAN-expert-parallel.md). |
 
 ## Kernels
 

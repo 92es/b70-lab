@@ -4,6 +4,10 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-17
+- DeepSeek Track A step A0: expert matmuls are 14% / 22% of decode op time, ceiling 1.12x plain / 1.19x DSpark;
+  expert-only parallelism rejected. Track B (V4.1) stands.
+- Strata 2-hour soak through llama-swap (IQ3_S, 1 x 200k, vision on): 134 cycles, 0 errors, 0 restarts, answers and
+  vision 134/134, decode 93.0 tok/s median with no drift, 112k-token prompt at ~1,430 tok/s.
 - DeepSeek plan updated: Track A = expert parallelism for V4 Flash 0731 in the llama.cpp fork (go / no-go after a
   1-hour profile); Track B = DeepSeek V4.1 Flash 1017 (released today, new ~510B architecture, not in llama.cpp yet),
   watching for support ([plan](deepseek-v4/PLAN-expert-parallel.md)).
