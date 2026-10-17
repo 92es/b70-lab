@@ -1,7 +1,8 @@
 # Qwen3.8-Flash-Next on 4x B70
 
-Qwen3.8-Flash-Next (llama.cpp arch `qwen4exp`): 125B-parameter MoE (512 experts, 10 per token, ~6B active) plus
-51B of n-gram embeddings, Gated DeltaNet + Qwen Sparse Attention layers, 262k native context, MTP head.
+Qwen3.8-Flash-Next (llama.cpp arch `qwen4exp`): 180B MoE (512 experts, 10 per token; 179,999,981,459 parameters
+by the Hugging Face safetensors count, including its n-gram embedding tables), hidden size 2560, 48 layers, Gated
+DeltaNet + Qwen Sparse Attention layers, 262k native context, MTP head.
 This is my daily-driver model.
 
 - Model file: Unsloth `Qwen3.8-Flash-Next-GGUF`, `UD-Q4_K_XL` (4 shards, 111.3 GB) + `mmproj-F16.gguf` for vision.

@@ -11,13 +11,13 @@ Arc cards, other drivers or Linux may differ.
 
 | Item | Value |
 |---|---|
-| GPUs | 4x Intel Arc Pro B70, 32 GB each (Xe2, `bmg_g21`) |
+| GPUs | 4x Intel Arc Pro B70, 32 GB each (Xe2, BMG-G31) |
 | CPU / board | AMD EPYC 7402P (Zen 2, 24 cores, no AVX-512), ASRock Rack ROMED8-2T |
 | System RAM | 64 GB DDR4 RDIMM until 2026-10-13, 112 GB since (7 x 16 GB; one slot fails its BIOS memory test) |
 | OS | Windows 11 Pro (build 26200) |
 | Compiler / runtime | Intel oneAPI 2026.0 (DPC++ compiler, oneMKL), Level Zero UR "v2" adapter |
 | GPU driver | 32.0.101.8976 since 2026-10-11; 32.0.101.8805 before that |
-| Builds | AOT for `bmg_g21`, `GGML_NATIVE=OFF` with AVX/AVX2/FMA/F16C (see [hardware-and-windows-notes.md](hardware-and-windows-notes.md)) |
+| Builds | llama.cpp: AOT for the `bmg_g21` target (runs on the B70), `GGML_NATIVE=OFF` with AVX/AVX2/FMA/F16C (see [hardware-and-windows-notes.md](hardware-and-windows-notes.md)). Strata: JIT build (its AOT target would be `bmg-g31`) |
 
 Before 2026-09-30 the box had 2 B70s and a Ryzen CPU. Numbers from that period are marked as such.
 
@@ -29,11 +29,11 @@ live, staged, rejected or an open bug. [CHANGELOG.md](CHANGELOG.md) has the date
 | Folder | What | Status |
 |---|---|---|
 | [llama.cpp-sycl/](llama.cpp-sycl/) | My changes to llama.cpp's SYCL backend: what each does, measured gains, upstream PR status | 2 merged upstream ([ggml-org/llama.cpp#29604](https://github.com/ggml-org/llama.cpp/pull/29604), [ggml-org/llama.cpp#29809](https://github.com/ggml-org/llama.cpp/pull/29809)), 1 open ([ggml-org/llama.cpp#30358](https://github.com/ggml-org/llama.cpp/pull/30358)); the rest live in a local fork or staged |
-| [flash-next/](flash-next/) | Qwen3.8-Flash-Next (125B MoE) tuning: 49 -> ~61 tok/s decode | live |
+| [flash-next/](flash-next/) | Qwen3.8-Flash-Next (180B MoE, 512 experts, 10 per token) tuning: 49 -> ~61 tok/s decode in llama.cpp | live |
 | [deepseek-v4/](deepseek-v4/) | DeepSeek V4 Flash: IQ2_XS/IQ3_XXS MoE kernel, DSpark drafting, sparse attention at depth | live |
 | [glm-5.3/](glm-5.3/) | GLM-5.3-Flash (321B MoE) brought into the fork: 16.5 -> 24-25 tok/s | live |
 | [gpt-oss/](gpt-oss/) | gpt-oss-120b: MXFP4 reorder, 3-card layer split, cross-card pipeline | live; MXFP4 work merged upstream |
-| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | works: 2 cards, IQ3_S, int8 KV, JIT build: 97.6 tok/s decode, 1,415 tok/s prompt read (an AOT miscompile caused the earlier wrong answers) |
+| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | current best for Flash-Next: 2 cards, IQ3_S, int8 KV, JIT build, `--ple-io mmap`: ~99 tok/s decode, ~1,420 tok/s prompt read (112k prompt: 1,433 tok/s), 2-hour soak clean, vision working. An AOT miscompile caused the earlier wrong answers |
 | [reproducers/](reproducers/) | Standalone programs: Level Zero multi-thread submission deadlock, Windows peer-access probe | deadlock still present on driver 8976; not yet reported to Intel |
 | [bench/](bench/) | Benchmark scripts and how to compare fairly | |
 | [rejected-ideas/](rejected-ideas/) | Things that did not help, with numbers | |

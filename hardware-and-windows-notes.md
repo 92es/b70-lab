@@ -32,7 +32,8 @@ load and my RAM watchdog killed the server. Observed for llama.cpp's Flash-Next,
 
 ## Building llama.cpp SYCL on Windows
 
-- oneAPI 2026.0 `icx`, AOT for `bmg_g21` (B70). `setvars.bat` was broken on this install; I set up `vcvars64` plus the
+- oneAPI 2026.0 `icx`. The B70's chip is BMG-G31; llama.cpp here is AOT-built for the `bmg_g21` target, which runs on
+  it. (Strata's AOT target is `bmg-g31`; it is built JIT here, see below.) `setvars.bat` was broken on this install; I set up `vcvars64` plus the
   oneAPI component `env\vars.bat` files by hand.
 - Build with `GGML_NATIVE=OFF` and an explicit ISA (AVX, AVX2, FMA, F16C, no AVX-512). Binaries built with
   `-march=native` on a Ryzen with AVX-512 died with `0xC000001D` (illegal instruction) at backend init after the move
