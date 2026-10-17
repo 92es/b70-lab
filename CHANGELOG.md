@@ -4,6 +4,9 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-17
+- Strata slow starts (~70 instead of ~98 tok/s) traced to `--ple-io direct`: unbuffered SSD reads of the 27 GB PLE
+  table every token, slowed by drive latency after ~130 GB of writes. `--ple-io mmap` restores ~99 tok/s; the
+  published best config now uses it. MTP draft sweep: upstream defaults (`--spec 4`, p-min 0) stay.
 - DeepSeek Track A step A0: expert matmuls are 14% / 22% of decode op time, ceiling 1.12x plain / 1.19x DSpark;
   expert-only parallelism rejected. Track B (V4.1) stands.
 - Strata 2-hour soak through llama-swap (IQ3_S, 1 x 200k, vision on): 134 cycles, 0 errors, 0 restarts, answers and

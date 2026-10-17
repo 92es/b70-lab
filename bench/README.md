@@ -42,6 +42,9 @@ repo (the original prompt was replaced). The other six prompts are the same; exp
   check the server's running list and recent requests before starting.
 - **Environment variables leak between arms** if you run A and B from one PowerShell session. Start each arm clean.
   (PowerShell variable names are also case-insensitive: `$t` and `$T` are the same variable.)
+- **Profile the slow case against a fast one before blaming hardware.** Strata's decode dropped from ~98 to ~70 tok/s;
+  heat, clocks, CPU, RAM, card pair, inter-card latency, timer resolution and a reboot were all ruled out before the
+  cause turned up: per-token random reads from the SSD (`--ple-io direct`). Check what a decode step reads from disk.
 - **Leave memory headroom.** A config that "fits" with a card at its memory limit can be ~3x slower than the next
   smaller one (Strata prompt chunk 10240 vs 8192).
 - **Watch host RAM during loads.** A config that does not fit can silently spill GPU allocations into system RAM

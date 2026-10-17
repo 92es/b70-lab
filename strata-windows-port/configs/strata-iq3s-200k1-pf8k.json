@@ -123,7 +123,7 @@
   "--mtp-draft-vocab",
   "<STRATA_SOURCE_DIR>\\data\\draft_vocab_en.bin",
   "--ple-io",
-  "direct",
+  "mmap",
   "--stream-experts",
   "--expert-cache",
   "auto",

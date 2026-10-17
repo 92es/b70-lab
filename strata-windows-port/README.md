@@ -8,7 +8,7 @@ Intel's `icx` compiler, including two-card expert parallel and int8 KV.
 - Model: ISTA-DASLab GSQ-RCO quants of Qwen3.8-Flash-Next, **IQ3_S** (84 GB, current) and IQ3_XXS (76 GB, earlier),
   sha256 checked; packs + MTP built on the same machine. Cards: two B70s (`level_zero:2,3`).
 - Status (2026-10-17): **best setup = IQ3_S, 1 slot x 200k context, int8 KV, prefill chunk 8192, JIT build**
-  (patch 0003): decode 97.6 tok/s, prompt read 1,415 tok/s at 33.6k, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
+  (patch 0003), `--ple-io mmap`: decode ~99 tok/s, prompt read ~1,420 tok/s at 33.6k, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
   Soak: 2 hours through llama-swap, clean (below). Not done: concurrent requests on two slots, AOT with oneAPI 2026.1.
 
 Patches (prepared with AI assistance; Strata is MIT, notice in
@@ -71,6 +71,44 @@ it replaced IQ3_XXS.
   error "card 0 gate/up type 23", then a restart). IQ3_XXS needs it **on** (off: prompt read 239 tok/s).
 - Prompt chunk size matters a lot: IQ3_S with 4k chunks 881 tok/s, with 8k chunks 1,415 tok/s.
 - IQ3_S at 2 x 200k and 2 x 131k does not fit on two 32 GB cards; 1 x 200k and 2 x 112k do.
+
+## PLE table: use `--ple-io mmap`, not `direct` (2026-10-17)
+
+The per-layer embedding (PLE) table of Qwen3.8-Flash-Next is 27 GB and is read on every token. With the upstream
+recipe's `--ple-io direct` (unbuffered random reads straight from the SSD), decode drifted from ~98 to ~70 tok/s: first
+on some starts (48, 65.6, 51.1 tok/s), then on every start, after the drive had taken ~130 GB of new writes. Same
+expert split and same draft acceptance, just slower steps. The SSD's read latency had changed.
+
+Ruled out first:
+- heat: at most 66 C, no throttle reasons reported by Level Zero sysman;
+- clocks: at the 2800 MHz maximum;
+- CPU load (3%), system RAM, leaked GPU memory;
+- the card pair (cards 0,1 also slow);
+- host-memory exchange latency between the cards (56-64 us with `ep_probe`, unchanged);
+- Windows timer resolution (`timeBeginPeriod(1)` A/B: no change);
+- a reboot (still ~70).
+
+llama.cpp stayed at 60.1 tok/s throughout; it keeps its PLE table in VRAM.
+
+**Fix:** `--ple-io mmap`, so the OS file cache serves the table from RAM: 98.9 / 99.4 / 98.0 tok/s on three fresh
+starts; through llama-swap 99.2 tok/s decode and 1,426 tok/s prompt read at 33.6k, vision working. It needs ~27 GB of
+free system RAM for the cache; under memory pressure, reads fall back to the disk. The published
+`strata-iq3s-200k1-pf8k.json` now uses `mmap`.
+
+## Draft settings (IQ3_S)
+
+IQ3_S, 1 x 200k, 2 cards, 7-prompt mean over 2 rounds:
+
+| MTP draft setting | Decode tok/s |
+|---|---|
+| `--spec 4 --spec-min-p 0` (upstream default, kept) | 99.2 |
+| `--spec 3` | 93.3 |
+| `--spec 5` | 95.8 |
+| `--spec 6` | 91.4 |
+| `--spec 4`, p-min 0.1 | 98.7 |
+| `--spec 4`, p-min 0.3 | 100.1 |
+
+No setting beats the defaults beyond run-to-run noise.
 
 ## 2-hour soak through llama-swap (2026-10-17)
 
