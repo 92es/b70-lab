@@ -4,6 +4,9 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-17
+- Strata Windows patch set complete (0001-0004; 0004 = optional timer-resolution switch, no measured effect); a
+  how-to-run recipe (JIT build, config essentials, CPU vision encoder, llama-swap entry) in strata-windows-port/.
+  Current best for Flash-Next recorded at the top of STATUS.md.
 - Strata 2 slots x 112k vs 1 x 200k: +17% aggregate with two concurrent streams, but -37% prompt read and 88k less
   context; 1 x 200k stays the default.
 - Strata slow starts (~70 instead of ~98 tok/s) traced to `--ple-io direct`: unbuffered SSD reads of the 27 GB PLE

@@ -1,0 +1,41 @@
+# 0004-sycl-Windows-optional-timer-resolution-request-STRAT
+#
+# Prepared with AI assistance.
+# Derived from Strata (MIT License, Copyright (c) 2026 Niko1221 and the Strata contributors);
+# see LICENSES/Strata-LICENSE.
+# Base: hotschmoe/Strata branch b70-night-20261016 @ 1c360526 + patches 0001-0003. Apply with `git apply`
+# (or `git am` after adding your own commit message). See ../README.md.
+#
+diff --git a/sycl/src/program/generate.cpp b/sycl/src/program/generate.cpp
+index 1126bb2..c41a310 100644
+--- a/sycl/src/program/generate.cpp
++++ b/sycl/src/program/generate.cpp
+@@ -92,6 +92,8 @@ namespace strata::prefill { void set_nonresident_share(double share); }   // SYC
+ #include "strata/core/family_layout.hpp"
+ #if defined(_WIN32)
+ #include <windows.h>
++#include <timeapi.h>
++#pragma comment(lib, "winmm.lib")
+ #include <psapi.h>
+ #include <io.h>
+ #include "strata_win_undefs.h"
+@@ -1696,6 +1698,16 @@ int main(int argc, char **argv) try {
+     // pipe or a file is block-buffered, so a program that dies loses every line it had already printed - which
+     // turns "it crashed at step 7" into "it crashed somewhere", and the difference is a debugging session.
+     std::setvbuf(stdout, nullptr, _IONBF, 0);
++#if defined(_WIN32)
++    // Windows: the GPU runtime's waits sleep at this process's timer resolution (per process since Windows 10 2004;
++    // the default is 15.6 ms). STRATA_WIN_TIMER_MS=N asks for N ms (default 1; 0 leaves the default).
++    {
++        const char* e = std::getenv("STRATA_WIN_TIMER_MS");
++        const int ms = e ? std::atoi(e) : 1;
++        if (ms > 0 && timeBeginPeriod((UINT) ms) == TIMERR_NOERROR)
++            std::fprintf(stderr, "strata generate: Windows timer resolution %d ms (STRATA_WIN_TIMER_MS=0 keeps the default)\n", ms);
++    }
++#endif
+ #if (defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)) && !defined(_WIN32)
+     // AMD, a file-backed arena (STRATA_ARENA_MMAP): ROCclr copies a pageable source of 1 MiB or more by locking its
+     // pages in place (a GPU userptr), and keeps them - so every expert the VRAM fill copied from the mapped
+-- 
+2.53.0.windows.2
+

@@ -1,38 +1,99 @@
 # Strata on native Windows
 
 [Strata](https://github.com/hotschmoe/Strata) is a SYCL inference engine with B70-specific work (two-card expert
-parallel, MTP, int8 KV). It targets Linux. These three patches make it build and run natively on Windows 11 with
+parallel, MTP, int8 KV). It targets Linux. These four patches make it build and run natively on Windows 11 with
 Intel's `icx` compiler, including two-card expert parallel and int8 KV.
 
 - Base: `hotschmoe/Strata` branch `b70-night-20261016` @ `1c360526` (from SergiioB/b70-launcher PR #4).
 - Model: ISTA-DASLab GSQ-RCO quants of Qwen3.8-Flash-Next, **IQ3_S** (84 GB, current) and IQ3_XXS (76 GB, earlier),
   sha256 checked; packs + MTP built on the same machine. Cards: two B70s (`level_zero:2,3`).
-- Status (2026-10-17): **best setup = IQ3_S, 1 slot x 200k context, int8 KV, prefill chunk 8192, JIT build**
-  (patch 0003), `--ple-io mmap`: decode ~99 tok/s, prompt read ~1,420 tok/s at 33.6k, answers correct. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
-  Soak: 2 hours through llama-swap, clean (below). Not done: concurrent requests on two slots, AOT with oneAPI 2026.1.
+- Status (2026-10-17): **best setup = IQ3_S, 1 slot x 200k context, int8 KV, prompt chunk 8192, JIT build,
+  `--ple-io mmap`**: decode ~99 tok/s, prompt read ~1,420 tok/s at 33.6k, answers correct, vision working, 2-hour
+  soak through llama-swap clean. The AOT build with oneAPI 2026.0 miscompiles the int8 attention (see below).
+  Not done: AOT with oneAPI 2026.1.
 
 Patches (prepared with AI assistance; Strata is MIT, notice in
-[../LICENSES/Strata-LICENSE](../LICENSES/Strata-LICENSE)):
+[../LICENSES/Strata-LICENSE](../LICENSES/Strata-LICENSE)). Apply in order with `git apply`:
 
 | Patch | What |
 |---|---|
 | `0001` native Windows build (icx) | CMake: `/fp:precise`, `/Qmkl:sequential`, C-safe warning flags; Level Zero SDK lookup; positioned reads with `ReadFile`; drop a CUDA-only shared-memory query; undo `<windows.h>` macros (`small`, `IN`, `OUT`, `near`, `far`) that clash with engine names; `memmem` fallback |
 | `0002` two-card expert parallel through host memory | every GPU shares one `sycl::context`; the shared expert-parallel regions are host USM in that context (one address for both cards). `STRATA_WIN_SHARED_CONTEXT=0` restores one context per device |
 | `0003` JIT build option for Xe2 | `STRATA_SYCL_XE2_JIT=ON` makes a JIT build define `STRATA_XMX_SG16` like the bmg AOT build does; `STRATA_SYCL_AOT_OPTIONS` passes extra ocloc options to an AOT build; `setenv` shim for two parity tests |
+| `0004` optional timer-resolution request | `STRATA_WIN_TIMER_MS=N` calls `timeBeginPeriod(N)` at engine start (default 1, 0 = off). Measured: no effect on decode (72 vs 72 tok/s); the configs set it to 0 |
 
 `configs/` has the engine configs used below (paths replaced with placeholders): `strata-iq3s-200k1-pf8k.json` (the
 current best setup), `strata-ep2-jit.json` (IQ3_XXS, int8, 2 x 200k), `strata-ep2-int8-32k.json`, `strata-ep2-fp16-96k.json`.
 
-## Build (JIT)
+## How to run it
+
+**1. Build (JIT).** In a `vcvars64` (MSVC) environment plus the oneAPI 2026.0 component `env\vars.bat` files
+(tbb, umf, dnnl, mkl, dpl, ocloc, compiler), with patches 0001-0004 applied:
 
 ```
-cmake -DSTRATA_SYCL_AOT= -DSTRATA_SYCL_XE2_JIT=ON ...
+cmake -B build-win -S sycl -G Ninja -DCMAKE_BUILD_TYPE=Release -DSTRATA_SYCL_AOT= -DSTRATA_SYCL_XE2_JIT=ON ^
+      -DSTRATA_SYCL_PARITY=OFF -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=icx
+cmake --build build-win --target strata
 ```
 
-With an empty `STRATA_SYCL_AOT` the device code is compiled by the GPU driver at first use. Here (driver
-32.0.101.8976) the engine was ready in under a minute and no startup penalty was seen afterwards.
-oneAPI 2026.0 `icx` with the MSVC toolchain environment; the oneAPI runtime DLLs must be next to `strata.exe` or on
-`PATH`.
+An empty `STRATA_SYCL_AOT` means the GPU driver compiles the device code at first use. Do not use the oneAPI 2026.0
+AOT build with int8 KV (wrong answers). On driver 32.0.101.8976 the engine was ready in under a minute. Put the oneAPI
+runtime DLLs next to `strata.exe` or on `PATH`.
+
+**2. Engine config essentials** (full file: `configs/strata-iq3s-200k1-pf8k.json`):
+
+| Setting | Value | Why |
+|---|---|---|
+| `--max-context` / slots | `200000`, 1 slot (`"parallel": 1`) | 2 x 200k does not fit IQ3_S on two 32 GB cards |
+| `--kv` | `int8` | needs the JIT build |
+| `--prefill` | `8192` | prompt chunk; 10240 sits at card 1's memory limit and runs ~3x slower |
+| `--ple-io` | `mmap` | `direct` reads the 27 GB PLE table from the SSD every token; needs ~27 GB free RAM |
+| `--spec` / `--spec-min-p` | `4` / `0` (upstream defaults) | other values were equal or worse |
+| `--expert-parallel-device` | `1` | the second card |
+| `STRATA_NIGHT_PREFILL_GROUPED` | `0` | the grouped prefill kernel does not support IQ3_S (IQ3_XXS needs it on) |
+| `STRATA_VERIFY_DEVICE_PLAN`, `STRATA_VERIFY_NO_HOST` | `1`, `1` | without them verify waits on a host doorbell and hangs |
+| `ONEAPI_DEVICE_SELECTOR` | e.g. `level_zero:2,3` | the two cards to use |
+
+**3. Vision (optional, CPU encoder).** `strata-vision.exe`, built from llama.cpp's `mtmd` tool at the llama.cpp
+commit the engine pins, with ISTA-DASLab's BF16 mmproj. Config section:
+
+```json
+"vision": {
+  "exe": "<STRATA_RUNTIME_DIR>\\strata-vision.exe",
+  "mmproj": "<MODELS_DIR>\\...\\mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "<MODELS_DIR>\\...\\Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf",
+  "gpu": false,
+  "max_tokens": 300,
+  "threads": 24
+}
+```
+
+About 4.4 s per new image on the test machine's CPU (24 threads, 300 image tokens).
+
+**4. Serve.** Strata's OpenAI-compatible server reads the engine config:
+
+```
+python sycl\serve\server_intel.py --engine strata --config <CONFIG.json> --host 127.0.0.1 --port <PORT>
+```
+
+A generic llama-swap entry (Windows):
+
+```yaml
+models:
+  qwen3.8-flash-next-strata:
+    cmd: >
+      <STRATA_SOURCE_DIR>\.venv\Scripts\python.exe <STRATA_SOURCE_DIR>\sycl\serve\server_intel.py
+      --engine strata --config <CONFIG.json> --host 127.0.0.1 --port ${PORT}
+    env:
+      - ONEAPI_DEVICE_SELECTOR=level_zero:2,3
+      - PYTHONUTF8=1
+    checkEndpoint: /health
+    cmdStop: taskkill /T /F /PID ${PID}
+    ttl: 0
+```
+
+`cmdStop` with `/T` ends the Python server and the `strata.exe` engine under it. One model swap logged
+`stop signal failed: exit status 255` although both processes did end; check the process list after a swap if in doubt.
 
 ## Results
 

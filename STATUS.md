@@ -10,6 +10,14 @@ review in llama.cpp), **rejected**, **open bug**, **fixed**, **superseded**, **p
 A speed number only counts after an answer check: the broken Strata AOT build produced garbage, the MTP draft
 predicted the garbage easily, and acceptance inflated tok/s (96.6 "tok/s" that meant nothing).
 
+## Current best per model
+
+| Model | Best setup | Numbers | Date | Details |
+|---|---|---|---|---|
+| Qwen3.8-Flash-Next | **Strata (Windows port), GSQ-RCO IQ3_S, 2x B70, 1 slot x 200k, int8 KV, JIT build, `--prefill 8192`, `--ple-io mmap`** | ~99 tok/s decode, ~1,420 tok/s prompt read at 33.6k (1,433 on a 112k prompt); answers correct; vision OK; 2-hour soak clean (134 cycles, 0 errors). llama.cpp fork on 4 cards: 60.6 / 748 | 2026-10-17 | [strata-windows-port](strata-windows-port/) |
+
+## All items
+
 | Item | Model | Gain / loss (numbers) | Status | Date | Details |
 |---|---|---|---|---|---|
 | DeepSeek V4.1 Flash 1017 - watching for llama.cpp support | DeepSeek V4.1 Flash 1017 (~510B, new architecture) | none yet: not loadable until llama.cpp supports it; ~170 GB at ~2.7 bits/weight vs 128 GB VRAM, so experts must split VRAM / RAM or use a ~2-bit quant | planned | 2026-10-17 | [plan, Track B](deepseek-v4/PLAN-expert-parallel.md) |
