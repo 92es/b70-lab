@@ -1,0 +1,80 @@
+# 0006-sycl-fuse-Q8_0-FFN-gate-up-mat-vec-with-GLU
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: llama.cpp master 4da6337 (2026-09-27); applies cleanly there, later masters may need a rebase
+# Personal research patch shared for other Intel Arc users. Not an upstream submission;
+# see ../README.md (or the folder README) for what it does, measured results and status.
+#
+diff --git a/ggml/src/ggml-sycl/fusion.cpp b/ggml/src/ggml-sycl/fusion.cpp
+index d3e9952..6651924 100644
+--- a/ggml/src/ggml-sycl/fusion.cpp
++++ b/ggml/src/ggml-sycl/fusion.cpp
+@@ -33,8 +33,9 @@ static bool ggml_sycl_should_fuse_mul_mat_glu(const ggml_tensor * gate, const gg
+     }
+ 
+     // fused GEMVs walk whole QK_K super-blocks: the reorder kernel covers same-type
+-    // q4_K, the plain-layout kernel covers q5_K / iq4_xs pairs incl. mixed gate/up types
+-    const bool reorder_pair = wu->type == GGML_TYPE_Q4_K && wg->type == GGML_TYPE_Q4_K;
++    // q4_K / q8_0, the plain-layout kernel covers q5_K / iq4_xs pairs incl. mixed gate/up types
++    const bool reorder_pair = wu->type == wg->type &&
++                              (wu->type == GGML_TYPE_Q4_K || wu->type == GGML_TYPE_Q8_0);
+     const bool plain_pair   = (wu->type == GGML_TYPE_Q5_K || wu->type == GGML_TYPE_IQ4_XS) &&
+                             (wg->type == GGML_TYPE_Q5_K || wg->type == GGML_TYPE_IQ4_XS);
+     if ((!reorder_pair && !plain_pair) || wu->ne[0] % QK_K != 0) {
+diff --git a/ggml/src/ggml-sycl/ggml-sycl.cpp b/ggml/src/ggml-sycl/ggml-sycl.cpp
+index 99ebdb3..275b425 100644
+--- a/ggml/src/ggml-sycl/ggml-sycl.cpp
++++ b/ggml/src/ggml-sycl/ggml-sycl.cpp
+@@ -4941,7 +4941,8 @@ static bool ggml_sycl_mul_mat_glu_mmvq_fused(ggml_backend_sycl_context & ctx, gg
+ 
+     // quant pairs the reorder kernel cannot serve (mixed gate/up types) take the
+     // standard-layout fused path instead; q4_K keeps the reorder path below
+-    if (wg->type != GGML_TYPE_Q4_K || wu->type != GGML_TYPE_Q4_K) {
++    const bool reorder_pair = wg->type == wu->type && (wg->type == GGML_TYPE_Q4_K || wg->type == GGML_TYPE_Q8_0);
++    if (!reorder_pair) {
+         return ggml_sycl_mul_mat_glu_mmvq_plain(ctx, glu, gate, up, wu, wg, act);
+     }
+ 
+diff --git a/ggml/src/ggml-sycl/mmvq.cpp b/ggml/src/ggml-sycl/mmvq.cpp
+index 7e4f22d..b3af559 100644
+--- a/ggml/src/ggml-sycl/mmvq.cpp
++++ b/ggml/src/ggml-sycl/mmvq.cpp
+@@ -3020,7 +3020,7 @@ static void launch_mul_mat_vec_q_reorder_glu_impl(const void * vx, const void *
+                                              const int ncols, const int nrows, const int stride_col_y_bytes,
+                                              const int stride_col_dst, const ggml_glu_op glu_op,
+                                              dpct::queue_ptr stream) {
+-    GGML_ASSERT(ncols % QK_K == 0);
++    GGML_ASSERT(ncols % ggml_sycl_reordered::block_q_t<reorder_vec_dot_q_sycl::gtype>::traits::qk == 0);
+ 
+     constexpr size_t num_subgroups = WARP_SIZE;
+ 
+@@ -3240,6 +3240,25 @@ bool ggml_sycl_mul_mat_vec_q_glu_reorder(enum ggml_type src0_type, enum ggml_glu
+                                          const void * vgate, const void * vy, float * dst, int ncols, int nrows,
+                                          int ncols_dst, int stride_col_y_bytes, int stride_col_dst,
+                                          dpct::queue_ptr stream) {
++    if (src0_type == GGML_TYPE_Q8_0) {
++        if (glu_op != GGML_GLU_OP_SWIGLU && glu_op != GGML_GLU_OP_GEGLU) {
++            return false;
++        }
++        // Q8_0 has no shared-weight/activation specialisation, so every width takes the generic
++        // one-row-per-sub-group fused branch
++        using vec_dot_q8 = reorder_vec_dot_q_sycl<GGML_TYPE_Q8_0>;
++        switch (ncols_dst) {
++            case 1: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 1>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 2: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 2>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 3: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 3>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 4: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 4>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 5: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 5>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 6: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 6>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 7: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 7>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            case 8: launch_mul_mat_vec_q_reorder_glu<vec_dot_q8, 8>(vx, vgate, vy, dst, ncols, nrows, stride_col_y_bytes, stride_col_dst, glu_op, stream); return true;
++            default: return false;
++        }
++    }
+     if (src0_type != GGML_TYPE_Q4_K) {
+         return false;
+     }
+-- 
+2.53.0.windows.2
+

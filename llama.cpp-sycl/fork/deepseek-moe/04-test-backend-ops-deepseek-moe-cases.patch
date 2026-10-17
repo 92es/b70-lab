@@ -1,0 +1,51 @@
+# 04-test-backend-ops-deepseek-moe-cases.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- src/tbo.cpp
++++ src/tbo-new.cpp
+@@ -9248,6 +9248,20 @@
+     std::vector<std::unique_ptr<test_case>> test_cases;
+     std::default_random_engine rng(0);
+ 
++    // DeepSeek-V4-Flash routed experts with 16-byte aligned rows (k = 2048 / 4096 / 8192): exercises the local-memory IQ MoE kernels
++    for (ggml_type t : {GGML_TYPE_IQ2_XS, GGML_TYPE_IQ3_XXS}) {
++        for (int64_t k : {2048, 4096, 8192}) {
++            for (int n_tok : {1, 2, 3, 4, 5, 8}) {
++                for (bool bc : {false, true}) {
++                    test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 32, 6, bc, 160, n_tok, k));
++                }
++            }
++        }
++        test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 256, 6, false, 4096, 4, 2048));
++        test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 256, 6, true, 2048, 4, 4096));
++        test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 8, 2, false, 33, 3, 2048));   // row count not a tile multiple
++    }
++
+     // unary ops
+     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+         for (int v : {0, 1}) {
+@@ -11465,6 +11479,19 @@
+ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
+     std::vector<std::unique_ptr<test_case>> test_cases;
+ 
++    // DeepSeek-V4-Flash routed experts (256 experts, top-6): ffn_down iq3_xxs [2048,4096,256] x f32[2048,6,T];
++    // ffn_gate/ffn_up iq2_xs [4096,2048,256] x f32[4096,1,T] (broadcast). T = tokens in the decode / verify batch.
++    // comparison types on the down shape: reordered Q4_K / MXFP4 vs plain Q8_0 / IQ4_XS / IQ3_S
++    for (ggml_type t : {GGML_TYPE_Q4_K, GGML_TYPE_MXFP4, GGML_TYPE_Q8_0, GGML_TYPE_IQ4_XS, GGML_TYPE_IQ3_S, GGML_TYPE_Q2_K}) {
++        for (int n_tok : {1, 4}) {
++            test_cases.emplace_back(new test_mul_mat_id(t, GGML_TYPE_F32, 256, 6, false, 4096, n_tok, 2048));
++        }
++    }
++    for (int n_tok : {1, 2, 3, 4, 5, 6, 8}) {
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ3_XXS, GGML_TYPE_F32, 256, 6, false, 4096, n_tok, 2048));
++        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_IQ2_XS,  GGML_TYPE_F32, 256, 6, true,  2048, n_tok, 4096));
++    }
++
+     // SWIGLU at a 27B-class FFN width, fused [gate|up] vs split operands
+     // note: same bytes either way, so a backend that indexes them differently shows it here
+     for (ggml_type type : {GGML_TYPE_F16, GGML_TYPE_F32}) {

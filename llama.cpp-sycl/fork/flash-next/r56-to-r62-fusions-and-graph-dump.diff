@@ -1,0 +1,399 @@
+# r56-to-r62-fusions-and-graph-dump.diff
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- /dev/fd/63
++++ /dev/fd/62
+@@ -8289,6 +8289,292 @@
+         });
+ }
+ 
++
++// ---- Flash-Next / Qwen-style decode small-op fusions (r60) ----------------------------------------------------------
++// Each replaces a short chain of tiny launches with one kernel that computes the same fp32 expressions in the same
++// order, so results are bit-identical to the unfused chain.
++
++static bool ggml_sycl_fusion_out_disjoint_or_same(const ggml_tensor * out, const ggml_tensor * src, bool allow_same) {
++    const uintptr_t ob = (uintptr_t) out->data, oe = ob + ggml_nbytes(out);
++    const uintptr_t sb = (uintptr_t) src->data, se = sb + ggml_nbytes(src);
++    if (allow_same && ob == sb && oe == se) { return true; }
++    return oe <= sb || se <= ob;
++}
++
++// (1) MoE expert sum: ADD(v0, v1), ADD(.., v2) ... over the n_expert_used views of ffn_moe_weighted -> one kernel
++#define GGML_SYCL_MOE_SUM_MAX 16
++struct ggml_sycl_moe_sum_match {
++    int n_adds = 0;
++    int n_terms = 0;
++    const float * p[GGML_SYCL_MOE_SUM_MAX];
++    int64_t ne0 = 0, ntok = 0, src_s1 = 0;
++    ggml_tensor * out = nullptr;
++};
++
++static bool ggml_sycl_match_moe_sum(const ggml_cgraph * g, int i, ggml_sycl_moe_sum_match & m) {
++    static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_MOE_SUM_FUSION", 0) != 0;
++    if (disabled || !g_ggml_sycl_enable_fusion || i + 2 >= g->n_nodes) { return false; }
++    const ggml_tensor * a = g->nodes[i];
++    if (a->op != GGML_OP_ADD || a->type != GGML_TYPE_F32 || !a->src[0] || !a->src[1]) { return false; }
++    const ggml_tensor * v0 = a->src[0];
++    const ggml_tensor * v1 = a->src[1];
++    if (v0->op != GGML_OP_VIEW || v1->op != GGML_OP_VIEW || !v0->view_src || v0->view_src != v1->view_src) { return false; }
++    const ggml_tensor * base = v0->view_src;
++    if (base->type != GGML_TYPE_F32 || base->ne[3] != 1 || base->nb[0] != sizeof(float)) { return false; }
++    if (v0->type != GGML_TYPE_F32 || v0->ne[2] != 1 || v0->ne[3] != 1 || v0->nb[0] != sizeof(float)) { return false; }
++    const int64_t ne0 = v0->ne[0], ntok = v0->ne[1];
++    if (v1->ne[0] != ne0 || v1->ne[1] != ntok || v0->nb[1] != v1->nb[1]) { return false; }
++    const size_t stride = v1->view_offs - v0->view_offs;
++    if (v1->view_offs <= v0->view_offs || stride != base->nb[1] || v0->view_offs != 0) { return false; }
++    if (base->ne[0] != ne0 || base->ne[2] != ntok) { return false; }
++    m.p[0] = (const float *) v0->data;
++    m.p[1] = (const float *) v1->data;
++    int terms = 2;
++    int L = 1;
++    while (i + L < g->n_nodes && terms < GGML_SYCL_MOE_SUM_MAX) {
++        const ggml_tensor * n = g->nodes[i + L];
++        if (n->op != GGML_OP_ADD || n->src[0] != g->nodes[i + L - 1] || !n->src[1]) { break; }
++        const ggml_tensor * vk = n->src[1];
++        if (vk->op != GGML_OP_VIEW || vk->view_src != base || vk->type != GGML_TYPE_F32 ||
++            vk->ne[0] != ne0 || vk->ne[1] != ntok || vk->nb[1] != v0->nb[1] ||
++            vk->view_offs != (size_t) terms * stride) { break; }
++        m.p[terms++] = (const float *) vk->data;
++        L++;
++    }
++    if (terms != base->ne[1] || terms < 3) { return false; }
++    std::vector<ggml_op> ops(L, GGML_OP_ADD);
++    int outs[1] = { i + L - 1 };
++    if (!ggml_can_fuse_subgraph(g, i, (int) ops.size(), ops.data(), outs, 1)) { return false; }
++    ggml_tensor * out = g->nodes[i + L - 1];
++    if (out->type != GGML_TYPE_F32 || !ggml_is_contiguous(out) || out->ne[0] != ne0 || out->ne[1] != ntok ||
++        out->ne[2] != 1 || out->ne[3] != 1) { return false; }
++    if (!ggml_sycl_fusion_out_disjoint_or_same(out, base, false)) { return false; }
++    m.n_adds = L; m.n_terms = terms; m.ne0 = ne0; m.ntok = ntok; m.src_s1 = (int64_t) (v0->nb[1] / sizeof(float)); m.out = out;
++    return true;
++}
++
++struct ggml_sycl_moe_sum_ptrs { const float * p[GGML_SYCL_MOE_SUM_MAX]; };
++
++static void ggml_sycl_moe_sum(ggml_backend_sycl_context & ctx, const ggml_sycl_moe_sum_match & m) {
++    float * dst = (float *) m.out->data;
++    const int64_t n = m.ne0 * m.ntok;
++    const int64_t ne0 = m.ne0, s1 = m.src_s1;
++    const int nt = m.n_terms;
++    ggml_sycl_moe_sum_ptrs pp;
++    for (int k = 0; k < GGML_SYCL_MOE_SUM_MAX; ++k) { pp.p[k] = k < nt ? m.p[k] : m.p[0]; }
++    constexpr size_t block = 256;
++    ctx.stream()->parallel_for(
++        sycl::nd_range<1>(sycl::range<1>(((n + block - 1) / block) * block), sycl::range<1>(block)),
++        [=](sycl::nd_item<1> item) {
++            const int64_t j = item.get_global_id(0);
++            if (j >= n) { return; }
++            const int64_t d = j % ne0, t = j / ne0;
++            const int64_t off = d + t * s1;
++            float acc = pp.p[0][off] + pp.p[1][off];
++            for (int k = 2; k < nt; ++k) { acc = acc + pp.p[k][off]; }
++            dst[j] = acc;
++        });
++}
++
++// (2) shared-expert gate tail: SIGMOID(g) -> MUL(shexp, sig) -> ADD(moe_out, gated)
++static bool ggml_sycl_match_shexp_gate(const ggml_cgraph * g, int i) {
++    static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_SHEXP_GATE_FUSION", 0) != 0;
++    if (disabled || !g_ggml_sycl_enable_fusion || i + 2 >= g->n_nodes) { return false; }
++    const ggml_tensor * sg = g->nodes[i];
++    const ggml_tensor * mu = g->nodes[i + 1];
++    const ggml_tensor * ad = g->nodes[i + 2];
++    if (sg->op != GGML_OP_UNARY || ggml_get_unary_op(sg) != GGML_UNARY_OP_SIGMOID || mu->op != GGML_OP_MUL || ad->op != GGML_OP_ADD) { return false; }
++    if (mu->src[1] != sg || ad->src[1] != mu || !mu->src[0] || !ad->src[0] || !sg->src[0]) { return false; }
++    const ggml_tensor * gin = sg->src[0];
++    const ggml_tensor * shx = mu->src[0];
++    const ggml_tensor * moe = ad->src[0];
++    const ggml_tensor * all[] = { gin, shx, moe, sg, mu, ad };
++    for (const ggml_tensor * t : all) {
++        if (t->type != GGML_TYPE_F32 || t->ne[2] != 1 || t->ne[3] != 1) { return false; }
++    }
++    const int64_t D = shx->ne[0], T = shx->ne[1];
++    if (sg->ne[0] != 1 || sg->ne[1] != T || gin->ne[0] != 1 || gin->ne[1] != T) { return false; }
++    if (mu->ne[0] != D || mu->ne[1] != T || ad->ne[0] != D || ad->ne[1] != T || moe->ne[0] != D || moe->ne[1] != T) { return false; }
++    if (!ggml_is_contiguous(gin) || !ggml_is_contiguous(shx) || !ggml_is_contiguous(moe) || !ggml_is_contiguous(ad) || !ggml_is_contiguous(sg)) { return false; }
++    if (!ggml_can_fuse_subgraph(g, i, { GGML_OP_UNARY, GGML_OP_MUL, GGML_OP_ADD }, { i + 2 })) { return false; }
++    return ggml_sycl_fusion_out_disjoint_or_same(ad, moe, true) && ggml_sycl_fusion_out_disjoint_or_same(ad, shx, true) &&
++           ggml_sycl_fusion_out_disjoint_or_same(ad, gin, false);
++}
++
++static void ggml_sycl_shexp_gate(ggml_backend_sycl_context & ctx, const ggml_cgraph * g, int i) {
++    const ggml_tensor * gin = g->nodes[i]->src[0];
++    const ggml_tensor * shx = g->nodes[i + 1]->src[0];
++    const ggml_tensor * moe = g->nodes[i + 2]->src[0];
++    float * dst = (float *) g->nodes[i + 2]->data;
++    const float * pg = (const float *) gin->data;
++    const float * ps = (const float *) shx->data;
++    const float * pm = (const float *) moe->data;
++    const int64_t D = shx->ne[0];
++    const int64_t n = D * shx->ne[1];
++    constexpr size_t block = 256;
++    ctx.stream()->parallel_for(
++        sycl::nd_range<1>(sycl::range<1>(((n + block - 1) / block) * block), sycl::range<1>(block)),
++        [=](sycl::nd_item<1> item) {
++            #pragma clang fp contract(off)
++            const int64_t j = item.get_global_id(0);
++            if (j >= n) { return; }
++            const int64_t t = j / D;
++            const float x = pg[t];
++            const float sig = 1.0f / (1.0f + sycl::exp(-x));
++            const float gated = ps[j] * sig;
++            dst[j] = pm[j] + gated;
++        });
++}
++
++// (3) GDN decay gate: ADD(alpha, dt_bias) -> SOFTPLUS -> MUL(.., ssm_a)
++static bool ggml_sycl_match_ssm_gate(const ggml_cgraph * g, int i) {
++    static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_SSM_GATE_FUSION", 0) != 0;
++    if (disabled || !g_ggml_sycl_enable_fusion || i + 2 >= g->n_nodes) { return false; }
++    const ggml_tensor * ad = g->nodes[i];
++    const ggml_tensor * sp = g->nodes[i + 1];
++    const ggml_tensor * mu = g->nodes[i + 2];
++    if (ad->op != GGML_OP_ADD || sp->op != GGML_OP_UNARY || ggml_get_unary_op(sp) != GGML_UNARY_OP_SOFTPLUS || mu->op != GGML_OP_MUL) { return false; }
++    if (sp->src[0] != ad || mu->src[0] != sp || !ad->src[0] || !ad->src[1] || !mu->src[1]) { return false; }
++    const ggml_tensor * al = ad->src[0];
++    const ggml_tensor * bi = ad->src[1];
++    const ggml_tensor * sa = mu->src[1];
++    const ggml_tensor * all[] = { al, bi, sa, ad, sp, mu };
++    for (const ggml_tensor * t : all) {
++        if (t->type != GGML_TYPE_F32 || t->ne[2] != 1 || t->ne[3] != 1) { return false; }
++    }
++    const int64_t H = al->ne[0], T = al->ne[1];
++    if (bi->ne[0] != H || bi->ne[1] != 1 || sa->ne[0] != H || sa->ne[1] != 1) { return false; }
++    if (ad->ne[0] != H || ad->ne[1] != T || mu->ne[0] != H || mu->ne[1] != T) { return false; }
++    if (!ggml_is_contiguous(al) || !ggml_is_contiguous(bi) || !ggml_is_contiguous(sa) || !ggml_is_contiguous(mu)) { return false; }
++    if (!ggml_can_fuse_subgraph(g, i, { GGML_OP_ADD, GGML_OP_UNARY, GGML_OP_MUL }, { i + 2 })) { return false; }
++    return ggml_sycl_fusion_out_disjoint_or_same(mu, al, true) && ggml_sycl_fusion_out_disjoint_or_same(mu, bi, false) &&
++           ggml_sycl_fusion_out_disjoint_or_same(mu, sa, false);
++}
++
++static void ggml_sycl_ssm_gate(ggml_backend_sycl_context & ctx, const ggml_cgraph * g, int i) {
++    const ggml_tensor * al = g->nodes[i]->src[0];
++    const ggml_tensor * bi = g->nodes[i]->src[1];
++    const ggml_tensor * sa = g->nodes[i + 2]->src[1];
++    float * dst = (float *) g->nodes[i + 2]->data;
++    const float * pa = (const float *) al->data;
++    const float * pb = (const float *) bi->data;
++    const float * ps = (const float *) sa->data;
++    const int64_t H = al->ne[0];
++    const int64_t n = H * al->ne[1];
++    constexpr size_t block = 128;
++    ctx.stream()->parallel_for(
++        sycl::nd_range<1>(sycl::range<1>(((n + block - 1) / block) * block), sycl::range<1>(block)),
++        [=](sycl::nd_item<1> item) {
++            #pragma clang fp contract(off)
++            const int64_t j = item.get_global_id(0);
++            if (j >= n) { return; }
++            const int64_t h = j % H;
++            const float x  = pa[j] + pb[h];
++            const float ax = sycl::fabs(x);
++            const float m  = sycl::fmax(x, 0.0f);
++            const float sp = m + sycl::log1p(sycl::exp(-ax));
++            dst[j] = sp * ps[h];
++        });
++}
++
++static int ggml_sycl_next_compute_node(const ggml_cgraph * graph, int i);
++
++// (4) GDN conv-state rollback snapshots: after CONCAT(conv_state, qkv) the graph copies K sliding 3-column windows of
++// the concat result into K slots of the recurrent cache with K x (CONT, CPY). One kernel writes all of them straight
++// from the concat output (the concat itself still runs: SSM_CONV reads it).
++#define GGML_SYCL_CONV_SNAP_MAX 8
++struct ggml_sycl_conv_snap_match {
++    int k = 0;
++    int last = 0;
++    const float * src[GGML_SYCL_CONV_SNAP_MAX];
++    float * dst[GGML_SYCL_CONV_SNAP_MAX];
++    int64_t s1[GGML_SYCL_CONV_SNAP_MAX];
++    int64_t w = 0, rows = 0;
++};
++
++static bool ggml_sycl_match_conv_snap(const ggml_cgraph * g, int i, ggml_sycl_conv_snap_match & m) {
++    static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_CONV_SNAP_FUSION", 0) != 0;
++    if (disabled || !g_ggml_sycl_enable_fusion) { return false; }
++    const ggml_tensor * c = g->nodes[i];
++    if (c->op != GGML_OP_CONCAT || c->type != GGML_TYPE_F32 || c->ne[2] != 1 || c->ne[3] != 1 ||
++        ggml_get_op_params_i32(c, 0) != 0) { return false; }
++    std::vector<int> idxs;
++    std::vector<ggml_op> ops;
++    std::vector<int> outs;
++    int prev = i;
++    int k = 0;
++    while (k < GGML_SYCL_CONV_SNAP_MAX) {
++        const int ia = ggml_sycl_next_compute_node(g, prev);
++        if (ia < 0) { break; }
++        const int ib = ggml_sycl_next_compute_node(g, ia);
++        if (ib < 0) { break; }
++        const ggml_tensor * a = g->nodes[ia];
++        const ggml_tensor * b = g->nodes[ib];
++        if (a->op != GGML_OP_CONT || b->op != GGML_OP_CPY || b->src[0] != a || !b->src[1]) { break; }
++        const ggml_tensor * v = a->src[0];
++        if (!v || v->op != GGML_OP_VIEW || v->view_src != c || v->type != GGML_TYPE_F32 || a->type != GGML_TYPE_F32) { break; }
++        const ggml_tensor * d = b->src[1];
++        if (d->type != GGML_TYPE_F32 || b->type != GGML_TYPE_F32 || !ggml_is_contiguous(d) || !ggml_is_contiguous(a) ||
++            ggml_nelements(d) != ggml_nelements(a)) { break; }
++        if (a->ne[2] != 1 || a->ne[3] != 1 || v->ne[0] != a->ne[0] || v->ne[1] != a->ne[1] ||
++            v->nb[0] != sizeof(float) || v->nb[1] % sizeof(float) != 0) { break; }
++        if (k > 0 && (a->ne[0] != m.w || a->ne[1] != m.rows)) { break; }
++        m.w = a->ne[0];
++        m.rows = a->ne[1];
++        m.src[k] = (const float *) v->data;
++        m.dst[k] = (float *) d->data;
++        m.s1[k] = (int64_t) (v->nb[1] / sizeof(float));
++        idxs.push_back(ia); ops.push_back(GGML_OP_CONT);
++        idxs.push_back(ib); ops.push_back(GGML_OP_CPY);
++        outs.push_back(ib);
++        m.last = ib;
++        prev = ib;
++        ++k;
++    }
++    if (k < 2) { return false; }
++    m.k = k;
++    if (!ggml_can_fuse_subgraph_ext(g, idxs.data(), (int) idxs.size(), ops.data(), outs.data(), (int) outs.size())) { return false; }
++    // destinations must not alias the concat result or each other
++    const uintptr_t cb = (uintptr_t) c->data, ce = cb + ggml_nbytes(c);
++    const size_t nbytes = (size_t) (m.w * m.rows) * sizeof(float);
++    for (int a = 0; a < k; ++a) {
++        const uintptr_t da = (uintptr_t) m.dst[a];
++        if (da < ce && cb < da + nbytes) { return false; }
++        for (int b = a + 1; b < k; ++b) {
++            const uintptr_t db = (uintptr_t) m.dst[b];
++            if (da < db + nbytes && db < da + nbytes) { return false; }
++        }
++    }
++    return true;
++}
++
++struct ggml_sycl_conv_snap_args {
++    const float * src[GGML_SYCL_CONV_SNAP_MAX];
++    float * dst[GGML_SYCL_CONV_SNAP_MAX];
++    int64_t s1[GGML_SYCL_CONV_SNAP_MAX];
++};
++
++static void ggml_sycl_conv_snap(ggml_backend_sycl_context & ctx, const ggml_sycl_conv_snap_match & m) {
++    ggml_sycl_conv_snap_args a;
++    for (int k = 0; k < GGML_SYCL_CONV_SNAP_MAX; ++k) {
++        const int kk = k < m.k ? k : 0;
++        a.src[k] = m.src[kk]; a.dst[k] = m.dst[kk]; a.s1[k] = m.s1[kk];
++    }
++    const int64_t w = m.w, per = m.w * m.rows;
++    const int64_t n = per * m.k;
++    constexpr size_t block = 256;
++    ctx.stream()->parallel_for(
++        sycl::nd_range<1>(sycl::range<1>(((n + block - 1) / block) * block), sycl::range<1>(block)),
++        [=](sycl::nd_item<1> item) {
++            const int64_t j = item.get_global_id(0);
++            if (j >= n) { return; }
++            const int k = (int) (j / per);
++            const int64_t r = j - (int64_t) k * per;
++            const int64_t row = r / w, col = r - row * w;
++            a.dst[k][r] = a.src[k][row * a.s1[k] + col];
++        });
++}
++
+ static bool ggml_sycl_can_fuse_hc_post_gate(const ggml_cgraph * graph, int i) {
+     static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_HC_POST_GATE", 0) != 0;
+     if (disabled || !g_ggml_sycl_enable_fusion ||
+@@ -8737,11 +9023,45 @@
+     std::map<std::string, std::pair<int64_t, int>> profile_mm;
+     const int64_t profile_t0 = profile_nodes ? ggml_time_us() : 0;
+ 
++    // GGML_SYCL_DUMP_GRAPH=N: print the node sequence of the first N decode-sized graphs (<= 8 tokens) with the indices
++    // that actually started a kernel launch (everything else was absorbed by a fusion).
++    static const int dump_graphs_max = ggml_sycl_get_env("GGML_SYCL_DUMP_GRAPH", 0);
++    static std::atomic<int> dump_graphs_done{0};
++    bool dump_this = false;
++    int dump_gid = -1;
++    std::string dump_buf;
++    std::vector<int> dump_exec;
++    if (dump_graphs_max > 0 && cgraph->n_nodes >= 100 && dump_graphs_done.load() < dump_graphs_max) {
++        int64_t ntok = -1;
++        for (int i = 0; i < cgraph->n_nodes && ntok < 0; i++) {
++            const ggml_tensor * t = cgraph->nodes[i];
++            if (t->op == GGML_OP_MUL_MAT_ID && t->src[1]) { ntok = t->src[1]->ne[2]; }
++        }
++        if (ntok >= 1 && ntok <= 8) {
++            dump_this = true;
++            dump_gid = dump_graphs_done.fetch_add(1);
++            char hb[256];
++            snprintf(hb, sizeof hb, "[GD] %d graph device %d nodes %d ntok %lld\n", dump_gid, sycl_ctx->device, cgraph->n_nodes, (long long) ntok);
++            dump_buf += hb;
++            for (int i = 0; i < cgraph->n_nodes; i++) {
++                const ggml_tensor * t = cgraph->nodes[i];
++                if (ggml_sycl_is_view_or_noop(t) || (t->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) { continue; }
++                char nb[512];
++                snprintf(nb, sizeof nb, "[GN] %d %d %s %s %s %lld,%lld,%lld,%lld t=%s s0=%s s1=%s\n", dump_gid, i, ggml_op_name(t->op),
++                        t->op == GGML_OP_UNARY ? ggml_unary_op_name(ggml_get_unary_op(t)) : "-", t->name,
++                        (long long) t->ne[0], (long long) t->ne[1], (long long) t->ne[2], (long long) t->ne[3],
++                        ggml_type_name(t->type), t->src[0] ? t->src[0]->name : "-", t->src[1] ? t->src[1]->name : "-");
++                dump_buf += nb;
++            }
++        }
++    }
++
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         ggml_tensor * node = cgraph->nodes[i];
+         if (ggml_sycl_is_view_or_noop(node)) {
+             continue;
+         }
++        if (dump_this && (node->flags & GGML_TENSOR_FLAG_COMPUTE) != 0) { dump_exec.push_back(i); }
+         if ((node->flags & GGML_TENSOR_FLAG_COMPUTE) == 0) {
+             continue;
+         }
+@@ -8819,6 +9139,35 @@
+             }
+         }
+ 
++        if (node->op == GGML_OP_CONCAT) {
++            ggml_sycl_conv_snap_match snap;
++            if (ggml_sycl_match_conv_snap(cgraph, i, snap)) {
++                if (!ggml_sycl_compute_forward(*sycl_ctx, node)) {
++                    GGML_ABORT("concat failed before conv snapshot fusion");
++                }
++                ggml_sycl_conv_snap(*sycl_ctx, snap);
++                i = snap.last;
++                continue;
++            }
++        }
++        if (node->op == GGML_OP_ADD) {
++            if (ggml_sycl_match_ssm_gate(cgraph, i)) {
++                ggml_sycl_ssm_gate(*sycl_ctx, cgraph, i);
++                i += 2;
++                continue;
++            }
++            ggml_sycl_moe_sum_match moe_sum;
++            if (ggml_sycl_match_moe_sum(cgraph, i, moe_sum)) {
++                ggml_sycl_moe_sum(*sycl_ctx, moe_sum);
++                i += moe_sum.n_adds - 1;
++                continue;
++            }
++        }
++        if (node->op == GGML_OP_UNARY && ggml_sycl_match_shexp_gate(cgraph, i)) {
++            ggml_sycl_shexp_gate(*sycl_ctx, cgraph, i);
++            i += 2;
++            continue;
++        }
+         const int nodes_to_skip = ggml_sycl_fuse(*sycl_ctx, cgraph, i);
+         if (nodes_to_skip != 0) {
+             i += nodes_to_skip;
+@@ -8916,6 +9265,13 @@
+         }
+         GGML_ASSERT(ok);
+     }
++    if (dump_this) {
++        dump_buf += "[GE] " + std::to_string(dump_gid);
++        for (int e : dump_exec) { dump_buf += " " + std::to_string(e); }
++        dump_buf += "\n";
++        fputs(dump_buf.c_str(), stderr);
++        fflush(stderr);
++    }
+     if (profile_nodes) {
+         int64_t sum = 0; int n = 0;
+         for (const auto & [op, value] : profile_totals) {

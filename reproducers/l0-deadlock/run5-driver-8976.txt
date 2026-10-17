@@ -1,0 +1,76 @@
+##### deadlock test on the new driver
+build exit=0  cmd.exe : Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331 |     + FullyQualifiedErrorId : NativeCommandError | Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331
+=== threads=4 seconds=60 mode=3 flags=32  18:13:32
+exit=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=32  18:14:05
+exit=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=32  18:14:41
+exit=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=32  18:15:17
+exit=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=32  18:15:54
+exit=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=32  18:16:30
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+=== threads=4 seconds=40 mode=3 flags=0  18:17:32
+exit=-1073741819
+=== threads=4 seconds=40 mode=3 flags=0  18:17:35
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+=== threads=4 seconds=40 mode=3 flags=0  18:18:16
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+=== threads=3 seconds=60 mode=3 flags=32  18:18:56
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+=== threads=3 seconds=60 mode=3 flags=32  18:19:57
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+=== threads=4 seconds=45 mode=2 flags=0  18:20:58
+exit=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.39183+4
+finished without a hang
+##### benchmarks on the new driver (live entries as configured)
+=== deepseek-v4-flash-dspark drv8976  runtime=master-66041e-b70dsv4-r52 (live: master-66041e-b70dsv4-r52)  envAdd=''  18:21:45
+loaded in 85s: avail=51.2GB shared=3.79GB dedicated=[29/28.3/29.1/25.6]
+r1 d=30000 read        prompt_n= 10790 pp=  421.5 gen= 200 tg= 25.74 wall=  33.4s top=[We:-0.0582 The:-3.0155 1:-6.1011] text=''
+r1 d=30000 repeat 1    prompt_n= 10790 pp=  459.8 gen=   1 tg=  0.00 wall=  23.5s top=[We:-0.0510 The:-3.2015 1:-5.7477] text=''
+r1 d=176000 read       prompt_n= 59234 pp=  447.3 gen= 200 tg= 24.82 wall= 140.6s top=[The:-0.5882 We:-0.8381 This:-5.2735] text=''
+r1 d=176000 repeat 1   prompt_n= 59234 pp=  446.3 gen=   1 tg=  0.00 wall= 132.9s top=[We:-0.4607 The:-1.0212 This:-5.6651] text=''
+end: avail=50.5GB shared=6.01GB dedicated=[29.4/28.7/29.5/26.1] np=1
+log problems: 0
+watch: 18:29:16 avail=53.5 shared=0.04 minAvail=50.0 maxShared=6.02 ded=0.0/0.3/0.0/0.0/0.0
+=== qwen3.8-flash-next-mtp drv8976  runtime=master-66041e-b70dsv4-r52 (live: master-66041e-b70dsv4-r52)  envAdd=''  18:29:26
+loaded in 81s: avail=49GB shared=10.89GB dedicated=[24.7/20.9/25/28.3]
+r1 d=30000 read        prompt_n=  8843 pp=  328.2 gen= 161 tg= 32.13 wall=  32.0s top=[The:-0.0228 This:-5.0412 `:-5.2747] text='The last complete function is `ggml_backend_sycl_buffer_set_tensor`. I'
+r1 d=30000 repeat 1    prompt_n=  8843 pp=  857.3 gen=   1 tg=  0.00 wall=  10.3s top=[The:-0.0243 This:-5.0114 `:-5.2643] text='The'
+r1 d=176000 read       prompt_n= 50351 pp=  728.2 gen= 169 tg= 31.17 wall=  74.6s top=[The:-0.0586 Based:-3.9194 This:-3.9556] text='The last complete function shown is `sycl_ext_free`. It serves as a un'
+r1 d=176000 repeat 1   prompt_n= 50351 pp=  736.1 gen=   1 tg=  0.00 wall=  68.5s top=[The:-0.0472 This:-4.0775 Based:-4.3152] text='The'
+end: avail=46GB shared=14.29GB dedicated=[25.4/21.6/25.4/28.9] np=1
+log problems: 0
+watch: 18:34:14 avail=50.2 shared=0.04 minAvail=44.7 maxShared=14.29 ded=0.0/0.3/0.0/0.0/0.0
+=== gpt-oss-120b drv8976  runtime=master-66041e-b70dsv4-r52 (live: master-66041e-b70dsv4-r52)  envAdd=''  18:34:23
+loaded in 51s: avail=51.3GB shared=4.91GB dedicated=[22.3/23.6/21]
+r1 d=30000 read        prompt_n=  8388 pp=  969.6 gen= 200 tg= 54.15 wall=  12.4s top=[<|channel|>:0.0000 <|constrain|>:-20.6034 _:-23.9603] text='**Function:** `ggml_backend_sycl_buffer_set_tensor` **Purpose** Copies'
+r1 d=30000 repeat 1    prompt_n=  8388 pp=1,170.3 gen=   1 tg=  0.00 wall=   7.2s top=[<|channel|>:0.0000 <|constrain|>:-20.4518 _:-23.8162] text='<|channel|>'
+r1 d=176000 read       prompt_n= 46740 pp=1,022.2 gen= 200 tg= 45.47 wall=  50.3s top=[<|channel|>:0.0000 <|constrain|>:-21.1237 _:-23.4592] text=''
+r1 d=176000 repeat 1   prompt_n= 46740 pp=1,027.9 gen=   1 tg=  0.00 wall=  45.6s top=[<|channel|>:0.0000 <|constrain|>:-20.4575 <|message|>:-23.1594] text='<|channel|>'
+end: avail=51.1GB shared=4.92GB dedicated=[22.5/23.8/21.2] np=1
+log problems: 0
+watch: 18:37:24 avail=51.1 shared=1.68 minAvail=50.3 maxShared=4.93 ded=0.0/0.3/0.0/0.0/0.0

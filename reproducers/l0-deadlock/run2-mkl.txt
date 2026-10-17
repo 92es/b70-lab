@@ -1,0 +1,28 @@
+idle for 8 min at 01:16:15 (state: none)
+build exit=0  cmd.exe : Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331 |     + FullyQualifiedErrorId : NativeCommandError | Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331
+=== threads=2 seconds=120 mode=3  01:16:34
+exit=0
+devices=4 threads=2 seconds=120 mode=3
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=235647  thr1=236098
+   ...
+t= 110s  thr0=5627007  thr1=5611455
+t= 115s  thr0=5887940  thr1=5871503
+t= 120s  thr0=6147519  thr1=6130289
+finished without a hang
+=== threads=4 seconds=300 mode=3  01:18:36
+exit=2
+devices=4 threads=4 seconds=300 mode=3
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=9876  thr1=10800  thr2=1143  thr3=1898
+   ...
+t=  25s  thr0=9876(stuck)  thr1=10800(stuck)  thr2=1143(stuck)  thr3=1898(stuck)
+t=  30s  thr0=9876(stuck)  thr1=10800(stuck)  thr2=1143(stuck)  thr3=1898(stuck)
+t=  35s  thr0=9876(stuck)  thr1=10800(stuck)  thr2=1143(stuck)  thr3=1898(stuck)
+HANG: a thread made no progress for 30 s

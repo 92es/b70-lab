@@ -1,0 +1,147 @@
+# lightning-indexer.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- a/ggml/src/ggml-sycl/lightning-indexer.cpp
++++ b/ggml/src/ggml-sycl/lightning-indexer.cpp
+@@ -1,6 +1,9 @@
+ #include "lightning-indexer.hpp"
+ #include "dequantize.hpp"
+ 
++#include <oneapi/mkl.hpp>
++#include <algorithm>
++
+ static void lightning_indexer_f32_sycl(
+         const char * q, const char * k, const char * w, const char * m, float * dst,
+         int64_t n_embd, int64_t n_head, int64_t n_batch, int64_t n_stream, int64_t n_kv,
+@@ -144,6 +147,115 @@
+         });
+ }
+ 
++// ---- batched scores through oneMKL -----------------------------------------------------------------------
++// For a prompt batch the scores are one large matrix product: every (token, head) query row against every
++// cached key. One half x half -> float GEMM per chunk of tokens computes the raw dot products; a reduce
++// kernel then applies relu, the per-head weights and the mask. Switches: GGML_SYCL_LID_GEMM (default 1),
++// GGML_SYCL_LID_GEMM_MIN_Q (batches of at least this many tokens always take this path), GGML_SYCL_LID_GEMM_MIN_WORK
++// (smaller batches take it from this many token x key pairs, 0 = never), GGML_SYCL_LID_GEMM_MB (score buffer size).
++static bool lightning_indexer_gemm_sycl(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
++    static const int enabled = ggml_sycl_get_env("GGML_SYCL_LID_GEMM", 1);
++    static const int min_q   = ggml_sycl_get_env("GGML_SYCL_LID_GEMM_MIN_Q", 32);
++    static const int buf_mb  = ggml_sycl_get_env("GGML_SYCL_LID_GEMM_MB", 128);
++    // small batches (decode, speculative verify) take this path once there are enough (token, key) pairs to pay
++    // for the launch and wait overhead of the MKL call
++    static const int min_work = ggml_sycl_get_env("GGML_SYCL_LID_GEMM_MIN_WORK", 8192);
++    if (!enabled) {
++        return false;
++    }
++
++    const ggml_tensor * q = dst->src[0];
++    const ggml_tensor * k = dst->src[1];
++    const ggml_tensor * w = dst->src[2];
++    const ggml_tensor * m = dst->src[3];
++
++    const int64_t n_embd  = q->ne[0];
++    const int64_t n_head  = q->ne[1];
++    const int64_t n_batch = q->ne[2];
++    const int64_t n_kv    = k->ne[2];
++
++    if (k->type != GGML_TYPE_F16 || q->ne[3] != 1 || k->ne[3] != 1 || dst->ne[3] != 1 || n_kv < 1 ||
++        (n_batch < min_q && (min_work <= 0 || n_batch * n_kv < (int64_t) min_work))) {
++        return false;
++    }
++    // query rows must form one dense [n_embd, n_head * n_batch] matrix; key rows one strided [n_embd, n_kv] matrix
++    if (q->nb[1] != (size_t) n_embd * sizeof(float) || q->nb[2] != (size_t) n_head * q->nb[1] ||
++        k->ne[0] != n_embd || k->nb[2] % sizeof(sycl::half) != 0 || k->nb[2] < (size_t) n_embd * sizeof(sycl::half) ||
++        w->ne[0] != n_head) {
++        return false;
++    }
++
++    using oneapi::mkl::transpose;
++    using oneapi::mkl::blas::column_major::gemm;
++
++    dpct::queue_ptr stream = ctx.stream();
++
++    const int64_t cols_total = n_head * n_batch;
++    const int64_t per_token  = n_head * n_kv * (int64_t) sizeof(float);
++    const int64_t t_chunk    = std::max<int64_t>(1, std::min<int64_t>(n_batch, ((int64_t) buf_mb << 20) / per_token));
++
++    ggml_sycl_pool_alloc<sycl::half> q16_alloc(ctx.pool(), (size_t) (n_embd * cols_total));
++    ggml_sycl_pool_alloc<float>      c_alloc(ctx.pool(), (size_t) (t_chunk * n_head * n_kv));
++    sycl::half * q16 = q16_alloc.get();
++    float *      c   = c_alloc.get();
++
++    const float *      q_f  = (const float *) q->data;
++    const sycl::half * k16  = (const sycl::half *) k->data;
++    const int64_t      ldk  = (int64_t) (k->nb[2] / sizeof(sycl::half));
++    const char *       w_p  = (const char *) w->data;
++    const char *       m_p  = (const char *) m->data;
++    float *            out  = (float *) dst->data;
++    const size_t       nbw1 = w->nb[1];
++    const size_t       nbm1 = m->nb[1];
++    const int64_t      s1   = (int64_t) (dst->nb[1] / sizeof(float));
++
++    stream->parallel_for(sycl::range<1>((size_t) (n_embd * cols_total)), [=](sycl::id<1> id) {
++        q16[id[0]] = (sycl::half) q_f[id[0]];
++    });
++    // MKL calls are not ordered against the kernels on the queue: everything they read must be complete
++    SYCL_CHECK(CHECK_TRY_ERROR(stream->wait()));
++
++    for (int64_t t0 = 0; t0 < n_batch; t0 += t_chunk) {
++        const int64_t tc   = std::min(t_chunk, n_batch - t0);
++        const int64_t cols = tc * n_head;
++
++        // c[(h + n_head * t), i_kv] = q[:, h, t0 + t] . k[:, i_kv]
++        sycl::event ev = gemm(*stream, transpose::trans, transpose::nontrans,
++                              cols, n_kv, n_embd,
++                              1.0f,
++                              q16 + t0 * n_head * n_embd, n_embd,
++                              k16, ldk,
++                              0.0f,
++                              c, cols);
++        try {
++            ev.wait_and_throw();
++        } catch (sycl::exception & e) {
++            GGML_LOG_ERROR("%s: GEMM failed: %s\n", __func__, e.what());
++            GGML_ABORT("lightning indexer GEMM failed");
++        }
++
++        stream->parallel_for(sycl::range<2>((size_t) tc, (size_t) n_kv), [=](sycl::id<2> id) {
++            const int64_t t    = (int64_t) id[0];
++            const int64_t i_kv = (int64_t) id[1];
++            const int64_t i_b  = t0 + t;
++
++            const float *      c_row  = c + t * n_head + i_kv * cols;
++            const float *      w_base = (const float *) (w_p + i_b * nbw1);
++            const sycl::half * m_base = (const sycl::half *) (m_p + i_b * nbm1);
++
++            float score = 0.0f;
++            for (int64_t h = 0; h < n_head; ++h) {
++                score += sycl::max(c_row[h], 0.0f) * w_base[h];
++            }
++            out[i_kv + i_b * s1] = score + static_cast<float>(m_base[i_kv]);
++        });
++        // the score buffer is reused by the next chunk's GEMM
++        SYCL_CHECK(CHECK_TRY_ERROR(stream->wait()));
++    }
++
++    return true;
++}
++
+ void ggml_sycl_op_lightning_indexer(ggml_backend_sycl_context & ctx, ggml_tensor * dst) {
+     scope_op_debug_print scope_dbg_print(__func__, dst, /*num_src=*/4);
+     const ggml_tensor * q = dst->src[0];
+@@ -183,6 +295,10 @@
+ 
+     GGML_ASSERT(n_embd == WARP_SIZE * 8);
+ 
++    if (lightning_indexer_gemm_sycl(ctx, dst)) {
++        return;
++    }
++
+     lightning_indexer_f32_sycl(
+             (const char *) q->data, (const char *) k->data,
+             (const char *) w->data, (const char *) m->data, (float *) dst->data,

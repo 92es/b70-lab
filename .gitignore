@@ -1,0 +1,11 @@
+# no model weights, binaries or build output
+*.gguf
+*.safetensors
+*.bin
+*.exe
+*.dll
+*.lib
+*.pdb
+*.map
+build/
+__pycache__/

@@ -1,0 +1,276 @@
+# 03-topk-moe-dsv4-route-fusion.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- src/topk-moe.cpp.orig
++++ src/topk-moe-new.cpp
+@@ -1,3 +1,5 @@
++#include <algorithm>
++#include <atomic>
+ #include <cfloat>
+ #include <initializer_list>
+ #include <vector>
+@@ -539,11 +541,259 @@
+     return is_ok;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------
++// DeepSeek-V4 routing chain in one launch (one sub-group per token row):
++//   probs = sqrt(softplus(logits)); sel = probs + bias; ids = top-k(sel); w = probs[ids];
++//   w = clamp(sum(w), lo, hi) normalization; w = w / sum * scale.
++// Graph order (build_moe_ffn, gating SQRT_SOFTPLUS with exp_probs_b):
++//   UNARY(SOFTPLUS) SQRT RESHAPE ADD(bias) ARGSORT VIEW(ids) GET_ROWS [RESHAPE SUM_ROWS CLAMP DIV RESHAPE] [SCALE]
++// Same softplus formula as element_wise.cpp (max(x,0) + log1p(exp(-|x|))). GGML_SYCL_DISABLE_DSV4_ROUTE_FUSION=1 disables it,
++// GGML_SYCL_DSV4_ROUTE_DEBUG=1 prints the node sequence the first few times the matcher looks at a softplus node.
++// ---------------------------------------------------------------------------------------------------------------
++template <int n_experts>
++static void dsv4_moe_route_kernel(const float * __restrict__ logits, const float * __restrict__ bias,
++                                  float * __restrict__ weights, int32_t * __restrict__ ids,
++                                  const int n_rows, const int n_expert_used, const bool with_norm,
++                                  const float clamp_lo, const float clamp_hi, const float scale_val, const int div_mode) {
++    auto      item_ct1 = sycl::ext::oneapi::this_work_item::get_nd_item<1>();
++    const int row      = item_ct1.get_group(0);
++    if (row >= n_rows) {
++        return;
++    }
++    const int lane = item_ct1.get_local_id(0);
++
++    logits  += (size_t) n_experts * row;
++    weights += (size_t) n_expert_used * row;
++    ids     += (size_t) n_experts * row;  // ids row stride is n_experts (the view of the argsort tensor)
++
++    constexpr int experts_per_thread = (n_experts > WARP_SIZE) ? n_experts / WARP_SIZE : 1;
++
++    float pr[experts_per_thread];   // unbiased probabilities (the output weights)
++    float wt[experts_per_thread];   // biased scores (the selection key)
++#pragma unroll
++    for (int i = 0; i < experts_per_thread; i++) {
++        const int expert = i * WARP_SIZE + lane;
++        if (n_experts % WARP_SIZE == 0 || expert < n_experts) {
++            const float x  = logits[expert];
++            const float sp = sycl::fmax(x, 0.0f) + sycl::log1p(sycl::exp(-sycl::fabs(x)));
++            const float p  = sycl::sqrt(sp);
++            pr[i] = p;
++            wt[i] = p + bias[expert];
++        } else {
++            pr[i] = 0.0f;
++            wt[i] = -INFINITY;
++        }
++        if (sycl::isnan(wt[i])) {
++            wt[i] = -FLT_MAX;
++        }
++    }
++
++    const sycl::sub_group sg = item_ct1.get_sub_group();
++
++    float output_weights[experts_per_thread];
++#pragma unroll
++    for (int i = 0; i < experts_per_thread; i++) {
++        output_weights[i] = 0.0f;
++    }
++    float wsum = 0.0f;
++
++    for (int k = 0; k < n_expert_used; k++) {
++        float max_val    = wt[0];
++        int   max_expert = lane;
++#pragma unroll
++        for (int i = 1; i < experts_per_thread; i++) {
++            const int expert = lane + i * WARP_SIZE;
++            if ((n_experts % WARP_SIZE == 0 || expert < n_experts) && wt[i] > max_val) {
++                max_val    = wt[i];
++                max_expert = expert;
++            }
++        }
++#pragma unroll
++        for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1) {
++            const float val    = dpct::permute_sub_group_by_xor(sg, max_val, mask);
++            const int   expert = dpct::permute_sub_group_by_xor(sg, max_expert, mask);
++            if (val > max_val || (val == max_val && expert < max_expert)) {
++                max_val    = val;
++                max_expert = expert;
++            }
++        }
++
++        const int owner = max_expert & (WARP_SIZE - 1);
++        const int slot  = max_expert / WARP_SIZE;
++        float     pv    = pr[slot];
++        pv              = sycl::select_from_group(sg, pv, (uint32_t) owner);
++        if (owner == lane) {
++            wt[slot] = -INFINITY;
++            ids[k]   = max_expert;
++        }
++        if ((k & (WARP_SIZE - 1)) == lane) {
++            output_weights[k / WARP_SIZE] = pv;
++        }
++        wsum += pv;   // identical on every lane, summed in selection order
++    }
++
++    if (with_norm) {
++        // sum exactly like k_sum_rows_f32: one value per lane (others 0), xor butterfly, lane 0's result
++        float tot = wsum;
++        if (n_expert_used <= WARP_SIZE) {
++            float v = (lane < n_expert_used) ? output_weights[0] : 0.0f;
++#pragma unroll
++            for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1) {
++                v += dpct::permute_sub_group_by_xor(sg, v, mask);
++            }
++            tot = sycl::select_from_group(sg, v, (uint32_t) 0);
++        }
++        const float s = sycl::fmin(sycl::fmax(tot, clamp_lo), clamp_hi);
++#pragma unroll
++        for (int i = 0; i < experts_per_thread; i++) {
++            output_weights[i] = div_mode == 1 ? output_weights[i] * (1.0f / s)
++                              : div_mode == 2 ? sycl::native::divide(output_weights[i], s)
++                                              : output_weights[i] / s;
++        }
++    }
++#pragma unroll
++    for (int i = 0; i < experts_per_thread; i++) {
++        const int idx = i * WARP_SIZE + lane;
++        if (idx < n_expert_used) {
++            weights[idx] = output_weights[i] * scale_val;
++        }
++    }
++}
++
++template <int n_experts>
++static void launch_dsv4_moe_route(queue_ptr stream, const float * logits, const float * bias, float * weights,
++                                  int32_t * ids, int n_rows, int n_expert_used, bool with_norm, float clamp_lo,
++                                  float clamp_hi, float scale_val, int div_mode) {
++    const sycl::range<1> block_dims(WARP_SIZE);
++    const sycl::range<1> block_nums(n_rows);
++    stream->parallel_for(sycl::nd_range<1>(block_nums * block_dims, block_dims),
++                         [=](sycl::nd_item<1> item_ct1) [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
++                             dsv4_moe_route_kernel<n_experts>(logits, bias, weights, ids, n_rows, n_expert_used,
++                                                              with_norm, clamp_lo, clamp_hi, scale_val, div_mode);
++                             GGML_UNUSED(item_ct1);
++                         });
++}
++
++static int ggml_sycl_fuse_dsv4_moe_route(ggml_backend_sycl_context & ctx, ggml_cgraph * cgraph, int i) {
++    static const bool disabled = ggml_sycl_get_env("GGML_SYCL_DISABLE_DSV4_ROUTE_FUSION", 0) != 0;
++    static const bool debug    = ggml_sycl_get_env("GGML_SYCL_DSV4_ROUTE_DEBUG", 0) != 0;
++    static std::atomic<int> debug_count{0};
++    ggml_tensor ** nodes = cgraph->nodes;
++    const int      n     = cgraph->n_nodes;
++    if (disabled || nodes[i]->op != GGML_OP_UNARY || ggml_get_unary_op(nodes[i]) != GGML_UNARY_OP_SOFTPLUS) {
++        return 0;
++    }
++    if (debug && debug_count.fetch_add(1) < 3) {
++        fprintf(stderr, "[SYCL] dsv4-route: softplus at node %d, following ops:", i);
++        for (int j = i; j < std::min(n, i + 16); ++j) {
++            fprintf(stderr, " %s", ggml_op_name(nodes[j]->op));
++        }
++        fprintf(stderr, "\n");
++    }
++    auto fail = [&](int why) {
++        if (debug && debug_count.load() < 12) {
++            fprintf(stderr, "[SYCL] dsv4-route: no match at node %d (why=%d)\n", i, why);
++        }
++        return 0;
++    };
++    if (i + 12 >= n) { return fail(1); }
++    ggml_tensor * sp = nodes[i];
++    ggml_tensor * sq = nodes[i + 1];
++    ggml_tensor * rs = nodes[i + 2];
++    ggml_tensor * ad = nodes[i + 3];
++    ggml_tensor * as = nodes[i + 4];
++    ggml_tensor * vw = nodes[i + 5];
++    ggml_tensor * gr = nodes[i + 6];
++    if (sq->op != GGML_OP_SQRT || sq->src[0] != sp || rs->op != GGML_OP_RESHAPE || rs->src[0] != sq ||
++        ad->op != GGML_OP_ADD || ad->src[0] != sq || as->op != GGML_OP_ARGSORT || as->src[0] != ad ||
++        vw->op != GGML_OP_VIEW || vw->src[0] != as || gr->op != GGML_OP_GET_ROWS || gr->src[0] != rs ||
++        gr->src[1] != vw) {
++        return fail(2);
++    }
++    const ggml_tensor * logits = sp->src[0];
++    const ggml_tensor * bias   = ad->src[1];
++    const int64_t n_expert = logits->ne[0];
++    if (logits->type != GGML_TYPE_F32 || !ggml_is_contiguous(logits) || sp->type != GGML_TYPE_F32 ||
++        bias == nullptr || bias->type != GGML_TYPE_F32 || !ggml_is_contiguous(bias) ||
++        ggml_nelements(bias) != n_expert || (n_expert & (n_expert - 1)) != 0 || n_expert > 512 || n_expert < 8 ||
++        vw->type != GGML_TYPE_I32 || vw->nb[0] != sizeof(int32_t) || vw->nb[1] != (size_t) n_expert * sizeof(int32_t)) {
++        return fail(3);
++    }
++    // optional normalization and scale
++    int cnt = 7;
++    bool with_norm = false;
++    const ggml_tensor * clamp = nullptr;
++    const ggml_tensor * scale = nullptr;
++    if (nodes[i + 7]->op == GGML_OP_RESHAPE && nodes[i + 7]->src[0] == gr && nodes[i + 8]->op == GGML_OP_SUM_ROWS &&
++        nodes[i + 8]->src[0] == nodes[i + 7] && nodes[i + 9]->op == GGML_OP_CLAMP && nodes[i + 9]->src[0] == nodes[i + 8] &&
++        nodes[i + 10]->op == GGML_OP_DIV && nodes[i + 10]->src[0] == nodes[i + 7] && nodes[i + 10]->src[1] == nodes[i + 9] &&
++        nodes[i + 11]->op == GGML_OP_RESHAPE && nodes[i + 11]->src[0] == nodes[i + 10]) {
++        with_norm = true;
++        clamp     = nodes[i + 9];
++        cnt       = 12;
++        if (i + 12 < n && nodes[i + 12]->op == GGML_OP_SCALE && nodes[i + 12]->src[0] == nodes[i + 11]) {
++            scale = nodes[i + 12];
++            cnt   = 13;
++        }
++    } else if (nodes[i + 7]->op == GGML_OP_SCALE && nodes[i + 7]->src[0] == gr) {
++        scale = nodes[i + 7];
++        cnt   = 8;
++    }
++    ggml_tensor * weights = nodes[i + cnt - 1];
++    std::vector<ggml_op> ops = { GGML_OP_UNARY, GGML_OP_SQRT, GGML_OP_RESHAPE, GGML_OP_ADD, GGML_OP_ARGSORT, GGML_OP_VIEW, GGML_OP_GET_ROWS };
++    if (with_norm) {
++        ops.insert(ops.end(), { GGML_OP_RESHAPE, GGML_OP_SUM_ROWS, GGML_OP_CLAMP, GGML_OP_DIV, GGML_OP_RESHAPE });
++    }
++    if (scale) {
++        ops.push_back(GGML_OP_SCALE);
++    }
++    GGML_ASSERT((int) ops.size() == cnt);
++    int out_nodes[2] = { i + 5, i + cnt - 1 };
++    if (weights->type != GGML_TYPE_F32 || !ggml_is_contiguous(weights) || weights->ne[0] != 1) {
++        return fail(4);
++    }
++    if (!ggml_can_fuse_subgraph(cgraph, i, ops.size(), ops.data(), out_nodes, 2)) {
++        return fail(5);
++    }
++    if (!ggml_sycl_check_fusion_memory_ranges(cgraph, i, (int) ops.size(), out_nodes, 2, /*is_topk_moe=*/true)) {
++        return fail(6);
++    }
++    const int n_rows        = (int) logits->ne[1];
++    const int n_expert_used = (int) weights->ne[1];
++    const float clamp_lo = clamp ? ggml_get_op_params_f32(clamp, 0) : -INFINITY;
++    const float clamp_hi = clamp ? ggml_get_op_params_f32(clamp, 1) : INFINITY;
++    const float scale_val = scale ? ggml_get_op_params_f32(scale, 0) : 1.0f;
++    if (scale && ggml_get_op_params_f32(scale, 1) != 0.0f) {
++        return fail(7);   // a scale bias is not implemented
++    }
++    const float * logits_d  = (const float *) logits->data;
++    const float * bias_d    = (const float *) bias->data;
++    float *       weights_d = (float *) weights->data;
++    int32_t *     ids_d     = (int32_t *) vw->data;
++    static const int div_mode = ggml_sycl_get_env("GGML_SYCL_DSV4_ROUTE_DIV", 0);
++    queue_ptr stream = ctx.stream();
++    ggml_sycl_set_device(ctx.device);
++    switch (n_expert) {
++        case 8:   launch_dsv4_moe_route<8>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 16:  launch_dsv4_moe_route<16>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 32:  launch_dsv4_moe_route<32>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 64:  launch_dsv4_moe_route<64>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 128: launch_dsv4_moe_route<128>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 256: launch_dsv4_moe_route<256>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        case 512: launch_dsv4_moe_route<512>(stream, logits_d, bias_d, weights_d, ids_d, n_rows, n_expert_used, with_norm, clamp_lo, clamp_hi, scale_val, div_mode); break;
++        default:  return fail(8);
++    }
++    return cnt - 1;
++}
++
+ int ggml_sycl_fuse(ggml_backend_sycl_context & ctx, ggml_cgraph * cgraph, int i) {
+     if (!g_ggml_sycl_enable_fusion) {
+         return 0;
+     }
+ 
++    if (const int skipped = ggml_sycl_fuse_dsv4_moe_route(ctx, cgraph, i)) {
++        return skipped;
++    }
+     return ggml_sycl_fuse_topk_moe(ctx, cgraph, i);
+ }
+ 

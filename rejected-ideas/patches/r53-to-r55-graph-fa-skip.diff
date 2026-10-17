@@ -1,0 +1,31 @@
+# r53-to-r55-graph-fa-skip.diff
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- /dev/fd/63
++++ /dev/fd/62
+@@ -8946,6 +8946,20 @@
+                 }
+                 break;
+             }
++            case GGML_OP_FLASH_ATTN_EXT: {
++                // Prompt-sized attention picks the oneDNN/MKL kernels (ggml_sycl_get_best_fattn_kernel: >= 32 query
++                // tokens). They run GEMMs and wait on the host, which cannot be recorded into a graph (the
++                // recording aborts with "Graph nodes cannot depend on events from outside the graph"). Decode and
++                // verify batches use the tile/vec kernels, which are plain submits.
++                static const int fa_graph_max_q = ggml_sycl_get_env("GGML_SYCL_GRAPH_FA_MAX_Q", 31);
++                const ggml_tensor * node = cgraph->nodes[i];
++                if (node->src[0]->ne[1] > fa_graph_max_q) {
++                    GGML_LOG_INFO("%s: disabling SYCL graphs: prompt-sized flash attention (%lld query tokens)\n", __func__,
++                                  (long long) node->src[0]->ne[1]);
++                    return false;
++                }
++                break;
++            }
+             case GGML_OP_MUL_MAT_ID: {
+                 // The generic path copies the expert ids to the host and waits. The fused single-token GEMV
+                 // runs entirely on the device, so it is graph-safe when it is certain to be taken: shapes

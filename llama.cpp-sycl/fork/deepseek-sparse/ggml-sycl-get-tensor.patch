@@ -1,0 +1,25 @@
+# ggml-sycl-get-tensor.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- a/ggml/src/ggml-sycl/ggml-sycl.cpp
++++ b/ggml/src/ggml-sycl/ggml-sycl.cpp
+@@ -788,6 +788,14 @@
+     ggml_sycl_set_device(ctx->device);
+     auto stream = dpct::dev_mgr::instance().get_device(ctx->device).default_queue();
+ 
++    // Drain the queue before reading: a USM copy is not reliably ordered against the kernels queued before it
++    // on this stack, so a read issued right after a graph (the backend-sampled draft tokens are a few ints)
++    // could return the previous contents of the buffer. GGML_SYCL_GET_TENSOR_WAIT=0 restores the old behaviour.
++    static const bool wait_first = ggml_sycl_get_env("GGML_SYCL_GET_TENSOR_WAIT", 1) != 0;
++    if (wait_first) {
++        SYCL_CHECK(CHECK_TRY_ERROR(dpct::dev_mgr::instance().get_device(ctx->device).queues_wait_and_throw()));
++    }
++
+     SYCL_CHECK(CHECK_TRY_ERROR(
+         stream.memcpy(data, (const char *)tensor->data + offset, size)
+             .wait()));

@@ -1,0 +1,101 @@
+# 0008-sycl-RFC-raise-the-TILE-flash-attention-decode-split
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: llama.cpp master 4da6337 (2026-09-27); applies cleanly there, later masters may need a rebase
+# Personal research patch shared for other Intel Arc users. Not an upstream submission;
+# see ../README.md (or the folder README) for what it does, measured results and status.
+#
+diff --git a/ggml/src/ggml-sycl/fattn-common.hpp b/ggml/src/ggml-sycl/fattn-common.hpp
+index 82813f7..9df6dfc 100644
+--- a/ggml/src/ggml-sycl/fattn-common.hpp
++++ b/ggml/src/ggml-sycl/fattn-common.hpp
+@@ -895,7 +895,8 @@ static void lauch_kernel(
+ template <int DV, int ncols1, int ncols2, fattn_kernel_t fattn_kernel, int warp_size>
+ void launch_fattn(
+     ggml_backend_sycl_context & ctx, ggml_tensor * dst, const int nwarps, const size_t nbytes_shared,
+-    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k) {
++    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k,
++    const bool tile_kernel = false) {
+ 
+     constexpr int ncols = ncols1 * ncols2;
+ 
+@@ -1095,6 +1096,17 @@ void launch_fattn(
+             }
+         }
+ 
++        // Xe2 (BMG) TILE decode: the wave-efficiency heuristic above settles on very few KV
++        // splits (nsm undercounts Xe2 cores), leaving each work-group a long serial walk over
++        // the KV cache. 48 splits measured +5.5% (Qwen3.8-27B) and +17% (Mistral-Small-3.2-24B)
++        // decode at 32k context on Arc Pro B70.
++        if (tile_kernel && Q->ne[1] <= 2) {
++            const gpu_arch arch = ggml_sycl_info().devices[id].hw_info.arch;
++            if (arch == gpu_arch::intel_gpu_bmg_g21 || arch == gpu_arch::intel_gpu_bmg_g31) {
++                parallel_blocks = std::min(std::max(parallel_blocks, 48), ntiles_KQ);
++            }
++        }
++
+         blocks_num.x = ntiles_x;
+         blocks_num.y = parallel_blocks;
+         blocks_num.z = ntiles_z_gqa*K->ne[2]*Q->ne[3];
+diff --git a/ggml/src/ggml-sycl/fattn-tile.hpp b/ggml/src/ggml-sycl/fattn-tile.hpp
+index dcdcad8..172cdd6 100644
+--- a/ggml/src/ggml-sycl/fattn-tile.hpp
++++ b/ggml/src/ggml-sycl/fattn-tile.hpp
+@@ -1086,7 +1086,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+                 const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+                 launch_fattn<DV, cols_per_block/ncols2, ncols2,
+                     flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+                 return;
+             }
+         }
+@@ -1097,7 +1097,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+                 const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+                 launch_fattn<DV, cols_per_block/ncols2, ncols2,
+                     flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+                 return;
+             }
+         }
+@@ -1108,7 +1108,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+                 const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+                 launch_fattn<DV, cols_per_block/ncols2, ncols2,
+                     flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++                    (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+                 return;
+             }
+         }
+@@ -1121,7 +1121,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+             const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+             launch_fattn<DV, cols_per_block/ncols2, ncols2,
+                 flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-                (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++                (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+             return;
+         }
+     }
+@@ -1132,7 +1132,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+         const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+         launch_fattn<DV, cols_per_block/ncols2, ncols2,
+             flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-            (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++            (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+         return;
+     }
+ 
+@@ -1142,7 +1142,7 @@ static void launch_fattn_tile_switch_ncols1(ggml_backend_sycl_context & ctx, ggm
+         const int nbatch_fa = ggml_sycl_fattn_tile_get_nbatch_fa(DKQ, DV, cols_per_block, cc);
+         launch_fattn<DV, cols_per_block/ncols2, ncols2,
+             flash_attn_tile<DKQ, DV, cols_per_block / ncols2, ncols2, use_logit_softcap, warp_size>, warp_size>
+-            (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false);
++            (ctx, dst, nwarps, nbytes_shared, nbatch_fa, true, true, false, true);
+         return;
+     }
+ 
+-- 
+2.53.0.windows.2
+

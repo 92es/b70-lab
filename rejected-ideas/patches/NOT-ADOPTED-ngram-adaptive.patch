@@ -1,0 +1,110 @@
+# NOT-ADOPTED-ngram-adaptive.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1911,8 +1911,40 @@
+ 
+         // consecutive accept rounds with low acceptance fraction (< 0.5)
+         int n_low = 0;
++
++        // adaptive draft length: the cap doubles after every fully accepted draft and falls back to the
++        // starting value after a rejection, so a long (expensive to verify) draft is only tried once the
++        // lookup has just proven itself on this stretch of text
++        size_t n_cap = 0;
++
++        // draft calls left to skip after a poorly accepted draft (the next speculative type drafts instead)
++        int n_cooldown = 0;
+     };
+ 
++    // LLAMA_SPEC_NGRAM_ADAPT=0 turns the adaptive length and the cool-down off (drafts always go up to n_max)
++    static bool adapt_enabled() {
++        static const bool v = [] { const char * e = std::getenv("LLAMA_SPEC_NGRAM_ADAPT"); return e == nullptr || std::atoi(e) != 0; }();
++        return v;
++    }
++    // starting draft length; 0 = no ramp (always up to n_max)
++    static size_t adapt_cap0() {
++        static const size_t v = [] { const char * e = std::getenv("LLAMA_SPEC_NGRAM_CAP0"); return (size_t) std::max(0, e ? std::atoi(e) : 8); }();
++        return v;
++    }
++    // a draft accepted below this percentage starts the cool-down
++    static double adapt_min_acc() {
++        static const double v = [] { const char * e = std::getenv("LLAMA_SPEC_NGRAM_MIN_ACC"); return (e ? std::atoi(e) : 50) / 100.0; }();
++        return v;
++    }
++    static bool adapt_trace() {
++        static const bool v = [] { const char * e = std::getenv("LLAMA_SPEC_NGRAM_TRACE"); return e != nullptr && std::atoi(e) != 0; }();
++        return v;
++    }
++    static int adapt_cooldown() {
++        static const int v = [] { const char * e = std::getenv("LLAMA_SPEC_NGRAM_COOLDOWN"); return std::max(0, e ? std::atoi(e) : 8); }();
++        return v;
++    }
++
+     std::vector<seq_info> sinfos;
+ 
+     common_speculative_impl_ngram_mod(
+@@ -1943,6 +1975,8 @@
+ 
+         sinfo.i_last = 0;
+         sinfo.n_draft_last = 0;
++        sinfo.n_cap = 0;
++        sinfo.n_cooldown = 0;
+ 
+         const size_t n = mod.get_n();
+         if (prompt.size() < n) {
+@@ -1992,13 +2026,23 @@
+             sinfo.i_last = cur_len - n;
+         }
+ 
+-        result.resize(n + params.n_max);
++        const bool adapt = adapt_enabled();
++        if (adapt && sinfo.n_cooldown > 0) {
++            sinfo.n_cooldown--;
++            return;
++        }
++        if (sinfo.n_cap == 0) {
++            sinfo.n_cap = adapt_cap0() > 0 ? adapt_cap0() : (size_t) params.n_max;
++        }
++        const int n_max_cur = adapt ? (int) std::min<size_t>((size_t) params.n_max, sinfo.n_cap) : params.n_max;
++
++        result.resize(n + n_max_cur);
+         for (size_t i = 0; i < n - 1; ++i) {
+             result[i] = prompt.at(cur_len - n + 1 + i);
+         }
+         result[n - 1] = dparams.id_last;
+ 
+-        for (int i = 0; i < params.n_max; ++i) {
++        for (int i = 0; i < n_max_cur; ++i) {
+             const llama_token token = mod.get(result.data() + i);
+             if (token == common_ngram_mod::EMPTY) {
+                 if (i < params.n_min) {
+@@ -2050,6 +2094,23 @@
+         // compute acceptance fraction if we have a recorded draft length
+         if (sinfo.n_draft_last > 0) {
+             const double f_acc = (double)n_accepted / (double)sinfo.n_draft_last;
++
++            if (adapt_trace()) {
++                fprintf(stderr, "[NGRAM] draft=%zu acc=%u cap=%zu\n", sinfo.n_draft_last, (unsigned) n_accepted, sinfo.n_cap);
++            }
++            if (adapt_enabled()) {
++                if ((size_t) n_accepted >= sinfo.n_draft_last) {
++                    sinfo.n_cap = std::min<size_t>((size_t) params.n_max, std::max<size_t>(sinfo.n_cap, 1) * 2);
++                } else {
++                    sinfo.n_cap = adapt_cap0() > 0 ? adapt_cap0() : (size_t) params.n_max;
++                    if (f_acc < adapt_min_acc()) {
++                        sinfo.n_cooldown = adapt_cooldown();
++                    }
++                }
++                // the draft has been judged: do not count it again if accept is called without a new draft
++                sinfo.n_draft_last = 0;
++                return;
++            }
+             if (f_acc < 0.25) {
+                 sinfo.n_low++;
+                 if (sinfo.n_low >= 5) {

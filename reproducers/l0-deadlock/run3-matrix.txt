@@ -1,0 +1,42 @@
+build exit=0  cmd.exe : Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 20
+=== threads=4 seconds=40 mode=3 flags=0  01:26:32
+exit=2
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=40 mode=3 flags=0  01:27:08
+exit=0
+finished without a hang
+=== threads=4 seconds=60 mode=3 flags=2  01:27:48
+exit=2
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=2  01:28:24
+exit=0
+finished without a hang
+=== threads=4 seconds=60 mode=3 flags=2  01:29:24
+exit=0
+finished without a hang
+=== threads=4 seconds=60 mode=3 flags=1  01:30:25
+exit=2
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=1  01:31:00
+exit=2
+HANG: a thread made no progress for 30 s
+=== threads=4 seconds=60 mode=3 flags=8  01:31:36
+exit=-1066598273
+=== threads=4 seconds=60 mode=3 flags=8  01:31:39
+exit=-1073741819
+=== threads=4 seconds=60 mode=3 flags=16  01:31:42
+exit=-1073741819
+=== threads=4 seconds=60 mode=3 flags=16  01:31:44
+exit=0
+finished without a hang
+=== threads=3 seconds=60 mode=3 flags=0  01:32:45
+exit=0
+finished without a hang
+=== threads=3 seconds=60 mode=3 flags=0  01:33:45
+exit=-1066598273
+=== threads=2 seconds=60 mode=3 flags=0  01:33:48
+exit=0
+finished without a hang
+=== threads=2 seconds=60 mode=3 flags=0  01:34:48
+exit=0
+finished without a hang

@@ -1,0 +1,27 @@
+# speculative-invalid-draft-token-guard.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- a/common/speculative.cpp
++++ b/common/speculative.cpp
+@@ -1319,6 +1319,16 @@
+ 
+                     const llama_token id = cur_p->data[0].id;
+ 
++                    // a token id read back from the backend sampler must be a vocabulary entry: drop the rest of the
++                    // draft instead of aborting when it is not (seen once as a float bit pattern on the SYCL backend)
++                    if (id < 0 || id >= llama_vocab_n_tokens(llama_model_get_vocab(llama_get_model(ctx_dft)))) {
++                        static int n_warned = 0;
++                        if (n_warned++ < 16) {
++                            LOG_WRN("%s: discarding draft from position %d: invalid token id %d from the draft sampler\n", __func__, i, id);
++                        }
++                        break;
++                    }
++
+                     common_sampler_accept(smpl, id, true);
+ 
+                     result.push_back(id);

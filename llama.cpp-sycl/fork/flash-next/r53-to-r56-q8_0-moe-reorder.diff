@@ -1,0 +1,78 @@
+# r53-to-r56-q8_0-moe-reorder.diff
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- /dev/fd/63
++++ /dev/fd/62
+@@ -5428,6 +5428,28 @@
+     return true;
+ }
+ 
++// Q8_0 MoE experts: every expert slice becomes its own self-contained SoA (all quants, then all scales), exactly the
++// layout the dense Q8_0 reorder kernels read with k = ne00 * ne01 per slice. One-time, on the first decode.
++static bool reorder_qw_q8_0_moe(uint8_t * data_device, size_t expert_bytes, int64_t n_expert, int ncols, int nrows,
++                                dpct::queue_ptr stream) {
++    GGML_ASSERT(expert_bytes == (size_t) ncols * (size_t) nrows / QK8_0 * sizeof(block_q8_0));
++    for (int64_t e = 0; e < n_expert; ++e) {
++        if (!reorder_qw_q8_0(data_device + (size_t) e * expert_bytes, ncols, nrows, expert_bytes, 0, stream)) {
++            GGML_ASSERT(e == 0 && "Q8_0 MoE reorder failed part-way");
++            return false;
++        }
++    }
++    return true;
++}
++
++static bool ggml_sycl_mmid_q8_0_reorder_ok(const ggml_tensor * src0) {
++    static const bool enabled = ggml_sycl_get_env("GGML_SYCL_MMID_Q8_0_REORDER", 1) != 0;
++    // the reorder kernels use 16-byte vector loads on the per-expert quant block
++    return enabled && src0->type == GGML_TYPE_Q8_0 && src0->ne[2] > 1 && src0->ne[3] == 1 &&
++           src0->ne[0] % QK8_0 == 0 && src0->nb[2] % 16 == 0 && (uintptr_t) src0->data % 16 == 0 &&
++           src0->nb[2] == (size_t) src0->ne[0] * src0->ne[1] / QK8_0 * sizeof(block_q8_0);
++}
++
+ static bool reorder_qw(const ggml_tensor * src0, dpct::queue_ptr stream) {
+     uint8_t * data_device = (uint8_t *) src0->data;
+     size_t ncols = src0->ne[0];
+@@ -5447,6 +5469,11 @@
+                 return reorder_qw_q6_k_moe(data_device, src0->nb[2], src0->ne[2], stream);
+             case GGML_TYPE_MXFP4:
+                 return reorder_qw_mxfp4_moe(data_device, src0->nb[2], src0->ne[2], stream);
++            case GGML_TYPE_Q8_0:
++                if (!ggml_sycl_mmid_q8_0_reorder_ok(src0)) {
++                    return false;
++                }
++                return reorder_qw_q8_0_moe(data_device, src0->nb[2], src0->ne[2], (int) ncols, (int) nrows, stream);
+             default:
+                 return false;
+         }
+@@ -5523,7 +5550,7 @@
+         return false;
+     }
+     if (src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q5_K && src0->type != GGML_TYPE_Q6_K &&
+-        src0->type != GGML_TYPE_MXFP4) {
++        src0->type != GGML_TYPE_MXFP4 && !ggml_sycl_mmid_q8_0_reorder_ok(src0)) {
+         return false;
+     }
+     if (src0->type == GGML_TYPE_MXFP4 && (src0->nb[2] % 16 != 0 || (uintptr_t) src0->data % 16 != 0)) {
+@@ -5538,7 +5565,7 @@
+         return;
+     }
+     if (src0->type != GGML_TYPE_Q4_K && src0->type != GGML_TYPE_Q5_K && src0->type != GGML_TYPE_Q6_K &&
+-        src0->type != GGML_TYPE_MXFP4) {
++        src0->type != GGML_TYPE_MXFP4 && !ggml_sycl_mmid_q8_0_reorder_ok(src0)) {
+         return;
+     }
+     // The MXFP4 reorder kernels use 8-byte vector loads, so every expert slice must stay aligned.
+@@ -6791,7 +6818,7 @@
+             const ggml_tensor_extra_gpu * extra_small = static_cast<const ggml_tensor_extra_gpu *>(src0->extra);
+             const bool reordered_small = extra_small && extra_small->optimized_feature.reorder;
+             const bool reorder_kernel  = src0->type == GGML_TYPE_Q4_K || src0->type == GGML_TYPE_Q5_K ||
+-                                         src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_MXFP4;
++                                         src0->type == GGML_TYPE_Q6_K || src0->type == GGML_TYPE_MXFP4 || src0->type == GGML_TYPE_Q8_0;
+             if (!reordered_small || reorder_kernel) {
+                 const int    padded_cols    = GGML_PAD((int) ne10, MATRIX_ROW_PADDING);
+                 const size_t bytes_per_qrow = (size_t) padded_cols * sizeof(block_q8_1) / QK8_1;

@@ -1,0 +1,46 @@
+# 0005-sycl-16-byte-loads-in-the-reordered-Q8_0-MMVQ
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: llama.cpp master 4da6337 (2026-09-27); applies cleanly there, later masters may need a rebase
+# Personal research patch shared for other Intel Arc users. Not an upstream submission;
+# see ../README.md (or the folder README) for what it does, measured results and status.
+#
+diff --git a/ggml/src/ggml-sycl/vecdotq.hpp b/ggml/src/ggml-sycl/vecdotq.hpp
+index 909f7a7..6a2ec26 100644
+--- a/ggml/src/ggml-sycl/vecdotq.hpp
++++ b/ggml/src/ggml-sycl/vecdotq.hpp
+@@ -428,20 +428,18 @@ template <> struct reorder_vec_dot_q_sycl<GGML_TYPE_Q8_0> {
+         const int8_t *  qs   = reinterpret_cast<const int8_t *>(base + ibx_offset.first);
+         const ggml_half  d   = *reinterpret_cast<const ggml_half *>(base + d_offset.first);
+ 
+-        int v[q8_0_traits::vdr_mmvq];
+-        int u[q8_0_traits::vdr_mmvq];
+-
+-#pragma unroll
+-        for (size_t i = 0; i < q8_0_traits::vdr_mmvq; ++i) {
+-            v[i] = get_int_from_int8(qs, iqs + i);
+-            u[i] = get_int_from_int8_aligned(q8_1_quant_ptr, iqs + i);
+-        }
++        // Reordered qs blocks are 32 contiguous bytes and iqs is a multiple of vdr_mmvq, so each
++        // lane's 4 ints (weights and q8_1 activations) are 16-byte aligned: one vector load each
++        // instead of 8 two-byte + 4 four-byte scalar loads.
++        static_assert(q8_0_traits::vdr_mmvq == 4, "vector load assumes vdr_mmvq == 4");
++        const sycl::int4 v = *reinterpret_cast<const sycl::int4 *>(qs + sizeof(int) * iqs);
++        const sycl::int4 u = *reinterpret_cast<const sycl::int4 *>(q8_1_quant_ptr + sizeof(int) * iqs);
+ 
+         int sumi = 0;
+-#pragma unroll
+-        for (size_t i = 0; i < q8_0_traits::vdr_mmvq; ++i) {
+-            sumi = dpct::dp4a(v[i], u[i], sumi);
+-        }
++        sumi = dpct::dp4a(v.x(), u.x(), sumi);
++        sumi = dpct::dp4a(v.y(), u.y(), sumi);
++        sumi = dpct::dp4a(v.z(), u.z(), sumi);
++        sumi = dpct::dp4a(v.w(), u.w(), sumi);
+ 
+         const sycl::half2 ds_values = *q8_1_ds;
+         return static_cast<float>(d) * static_cast<float>(ds_values[0]) * sumi;
+-- 
+2.53.0.windows.2
+

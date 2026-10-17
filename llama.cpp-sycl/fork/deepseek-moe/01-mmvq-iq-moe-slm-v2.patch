@@ -1,0 +1,218 @@
+# 01-mmvq-iq-moe-slm-v2.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- src/mmvq.cpp.orig
++++ src/mmvq-new.cpp
+@@ -2946,6 +2946,185 @@
+     });
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------
++// IQ2_XS / IQ3_XXS routed-expert decode kernel (MoE, 1..8 tokens): same dot products as the generic mmvq kernel
++// (vec_dot_iq2_xs_q8_1 / vec_dot_iq3_xxs_q8_1), but
++//   - one work-group covers NSG sub-groups x RPS rows of ONE (token, expert) entry instead of one row per
++//     16-thread work-group;
++//   - each sub-group stages its rows through local memory with 16-byte loads (the blocks are 74 / 98 bytes, so
++//     the generic kernel issues many small, 2-byte-aligned loads);
++//   - the codebook tables and the entry's q8_1 activations are staged once per work-group in local memory.
++// Needs 16-byte aligned rows (checked by the launcher); anything else takes the generic kernel.
++// GGML_SYCL_MOE_IQ_SLM=0 disables it, GGML_SYCL_MOE_IQ_SLM_CFG=<nsg>x<rps> selects the tile (default 8x2).
++// ---------------------------------------------------------------------------------------------------------------
++template <ggml_type TYPE> struct moe_iq_traits;
++
++template <> struct moe_iq_traits<GGML_TYPE_IQ2_XS> {
++    using block_t = block_iq2_xs;
++    static constexpr int table_bytes = 512 * 8 + 128 * 8;
++    static __dpct_inline__ void fill(uint64_t * slm, const int tid, const int nthr) {
++        for (int i = tid; i < 512; i += nthr) { slm[i] = iq2xs_grid[i]; }
++        for (int i = tid; i < 128; i += nthr) { slm[512 + i] = ksigns64[i]; }
++    }
++    static __dpct_inline__ float dot(const block_t * x, const block_q8_1 * y, const int ib32, const uint64_t * slm) {
++        return vec_dot_iq2_xs_q8_1(x, y, ib32, slm, slm + 512);
++    }
++};
++
++template <> struct moe_iq_traits<GGML_TYPE_IQ3_XXS> {
++    using block_t = block_iq3_xxs;
++    static constexpr int table_bytes = 256 * 4 + 128 * 8;
++    static __dpct_inline__ void fill(uint64_t * slm, const int tid, const int nthr) {
++        uint32_t * g = (uint32_t *) slm;
++        for (int i = tid; i < 256; i += nthr) { g[i] = iq3xxs_grid[i]; }
++        for (int i = tid; i < 128; i += nthr) { slm[128 + i] = ksigns64[i]; }
++    }
++    static __dpct_inline__ float dot(const block_t * x, const block_q8_1 * y, const int ib32, const uint64_t * slm) {
++        return vec_dot_iq3_xxs_q8_1(x, y, ib32, (const uint32_t *) slm, slm + 128);
++    }
++};
++
++template <ggml_type TYPE, int NSG, int RPS>
++static void mul_mat_vec_q_moe_iq_slm(
++    const char * __restrict__ vx_base, const char * __restrict__ vy_base,
++    float * __restrict__ dst_base, const int32_t * __restrict__ ids_dev,
++    const int ncols, const int nrows,
++    const size_t expert_weight_stride, const size_t dst_row_stride,
++    const size_t src1_row_stride, const int src1_row_div,
++    const sycl::local_accessor<sycl::uint4, 1> & slm_tbl_acc,
++    const sycl::local_accessor<sycl::uint4, 1> & slm_y_acc,
++    const sycl::local_accessor<sycl::uint4, 1> & slm_x_acc,
++    const sycl::nd_item<3> & item) {
++    using T       = moe_iq_traits<TYPE>;
++    using block_t = typename T::block_t;
++
++    const int tid  = (int) item.get_local_id(2);
++    const int nthr = NSG * WARP_SIZE;
++    const int sgi  = tid / WARP_SIZE;
++    const int lane = tid % WARP_SIZE;
++    auto      sg   = item.get_sub_group();
++
++    const int entry = (int) item.get_group(1);
++    const int i02   = ids_dev[entry];
++    const char * vx = vx_base + (size_t) i02 * expert_weight_stride;
++    const char * vy = vy_base + (size_t) (entry / src1_row_div) * src1_row_stride;
++    float *      dst = (float *) ((char *) dst_base + (size_t) entry * dst_row_stride);
++
++    uint64_t *    tbl = (uint64_t *) slm_tbl_acc.template get_multi_ptr<sycl::access::decorated::no>().get();
++    sycl::uint4 * ysl = slm_y_acc.template get_multi_ptr<sycl::access::decorated::no>().get();
++    sycl::uint4 * xsl = slm_x_acc.template get_multi_ptr<sycl::access::decorated::no>().get();
++
++    // work-group wide: codebook tables + this entry's activations
++    T::fill(tbl, tid, nthr);
++    {
++        const int       y_words = (ncols / QK8_1) * (int) sizeof(block_q8_1) / 4;
++        const uint32_t * ys     = (const uint32_t *) vy;
++        uint32_t *       yd     = (uint32_t *) ysl;
++        for (int i = tid; i < y_words; i += nthr) { yd[i] = ys[i]; }
++    }
++
++    // sub-group wide: this sub-group's rows, 16 bytes per lane per step
++    const int nblk      = ncols / QK_K;
++    const int row_bytes = nblk * (int) sizeof(block_t);
++    const int nchunk    = row_bytes / 16;
++    const int row0      = ((int) item.get_group(2) * NSG + sgi) * RPS;
++    sycl::uint4 * xs    = xsl + (size_t) sgi * RPS * nchunk;
++#pragma unroll
++    for (int r = 0; r < RPS; ++r) {
++        if (row0 + r < nrows) {
++            const sycl::uint4 * src = (const sycl::uint4 *) (vx + (size_t) (row0 + r) * row_bytes);
++            for (int c = lane; c < nchunk; c += WARP_SIZE) { xs[r * nchunk + c] = src[c]; }
++        }
++    }
++    sycl::group_barrier(item.get_group());
++
++    const block_q8_1 * y = (const block_q8_1 *) ysl;
++    const int nunits = nblk * 8;   // 8 groups of 32 weights per QK_K block
++#pragma unroll
++    for (int r = 0; r < RPS; ++r) {
++        const int row = row0 + r;
++        if (row >= nrows) { break; }
++        const block_t * xb = (const block_t *) (xs + (size_t) r * nchunk);
++        float tmp = 0.0f;
++        for (int u = lane; u < nunits; u += WARP_SIZE) {
++            const int b = u >> 3;
++            tmp += T::dot(xb + b, y + b * 8, u & 7, tbl);
++        }
++#pragma unroll
++        for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1) {
++            tmp += dpct::permute_sub_group_by_xor(sg, tmp, mask);
++        }
++        if (lane == 0) { dst[row] = tmp; }
++    }
++}
++
++template <ggml_type TYPE, int NSG, int RPS>
++static void launch_moe_iq_slm_cfg(
++    const void * vx_base, const void * vy, const int32_t * ids_dev, float * dst_base,
++    const int ncols, const int nrows, const int n_experts_used,
++    const size_t expert_weight_stride, const size_t dst_row_stride,
++    const size_t src1_row_stride, const int src1_row_div, dpct::queue_ptr stream) {
++    using T = moe_iq_traits<TYPE>;
++    const int row_bytes = (ncols / QK_K) * (int) sizeof(typename T::block_t);
++    const int nchunk    = row_bytes / 16;
++    const size_t n_tbl  = (T::table_bytes + 15) / 16;
++    const size_t n_y    = ((size_t) (ncols / QK8_1) * sizeof(block_q8_1) + 15) / 16;
++    const size_t n_x    = (size_t) NSG * RPS * nchunk;
++    const sycl::range<3> block_nums(1, (size_t) n_experts_used, (size_t) ((nrows + NSG * RPS - 1) / (NSG * RPS)));
++    const sycl::range<3> block_dims(1, 1, (size_t) NSG * WARP_SIZE);
++    stream->submit([&](sycl::handler & cgh) {
++        sycl::local_accessor<sycl::uint4, 1> slm_tbl(sycl::range<1>(n_tbl), cgh);
++        sycl::local_accessor<sycl::uint4, 1> slm_y(sycl::range<1>(n_y), cgh);
++        sycl::local_accessor<sycl::uint4, 1> slm_x(sycl::range<1>(n_x), cgh);
++        const char * vxb = (const char *) vx_base;
++        const char * vyb = (const char *) vy;
++        cgh.parallel_for(
++            sycl::nd_range<3>(block_nums * block_dims, block_dims),
++            [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
++                mul_mat_vec_q_moe_iq_slm<TYPE, NSG, RPS>(vxb, vyb, dst_base, ids_dev, ncols, nrows,
++                    expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div,
++                    slm_tbl, slm_y, slm_x, item);
++            });
++    });
++}
++
++// returns false when the shape / alignment does not suit the kernel (caller then uses the generic kernel)
++template <ggml_type TYPE>
++static bool launch_moe_iq_slm(
++    const void * vx_base, const void * vy, const int32_t * ids_dev, float * dst_base,
++    const int ncols, const int nrows, const int n_experts_used,
++    const size_t expert_weight_stride, const size_t dst_row_stride,
++    const size_t src1_row_stride, const int src1_row_div, dpct::queue_ptr stream) {
++    using T = moe_iq_traits<TYPE>;
++    static const bool enabled = ggml_sycl_get_env("GGML_SYCL_MOE_IQ_SLM", 1) != 0;
++    static const int  cfg     = ggml_sycl_get_env("GGML_SYCL_MOE_IQ_SLM_CFG", 82);  // <nsg><rps>: 82 = 8x2
++    if (!enabled || ncols % QK_K != 0 || ncols > 8192) {
++        return false;
++    }
++    const size_t row_bytes = (size_t) (ncols / QK_K) * sizeof(typename T::block_t);
++    if (row_bytes % 16 != 0 || expert_weight_stride % 16 != 0 || (uintptr_t) vx_base % 16 != 0 ||
++        src1_row_stride % 4 != 0 || (uintptr_t) vy % 4 != 0) {
++        return false;
++    }
++#define MOE_IQ_CASE(C, NSG, RPS)                                                                                    \
++    case C:                                                                                                         \
++        launch_moe_iq_slm_cfg<TYPE, NSG, RPS>(vx_base, vy, ids_dev, dst_base, ncols, nrows, n_experts_used,        \
++                                              expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div,  \
++                                              stream);                                                              \
++        return true;
++    switch (cfg) {
++        MOE_IQ_CASE(41, 4, 1)
++        MOE_IQ_CASE(42, 4, 2)
++        MOE_IQ_CASE(44, 4, 4)
++        MOE_IQ_CASE(81, 8, 1)
++        MOE_IQ_CASE(82, 8, 2)
++        MOE_IQ_CASE(84, 8, 4)
++        default:
++            return false;
++    }
++#undef MOE_IQ_CASE
++}
++
+ bool ggml_sycl_mul_mat_vec_q_id_supports_type(enum ggml_type src0_type) {
+     // keep in sync with the switch in ggml_sycl_mul_mat_vec_q_id()
+     switch (src0_type) {
+@@ -3047,6 +3226,10 @@
+                 expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream);
+             return true;
+         case GGML_TYPE_IQ2_XS:
++            if (launch_moe_iq_slm<GGML_TYPE_IQ2_XS>(vx_base, vy, ids_dev, dst_base, ncols, nrows, n_experts_used,
++                    expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream)) {
++                return true;
++            }
+             launch_mul_mat_vec_q_moe<QK_K, QI2_XS/2, block_iq2_xs, VDR_IQ2_XS_Q8_1_MMVQ, vec_dot_iq2_xs_q8_1_moe>(
+                 vx_base, vy, ids_dev, dst_base, ncols, nrows, n_experts_used,
+                 expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream);
+@@ -3057,6 +3240,10 @@
+                 expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream);
+             return true;
+         case GGML_TYPE_IQ3_XXS:
++            if (launch_moe_iq_slm<GGML_TYPE_IQ3_XXS>(vx_base, vy, ids_dev, dst_base, ncols, nrows, n_experts_used,
++                    expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream)) {
++                return true;
++            }
+             launch_mul_mat_vec_q_moe<QK_K, QI3_XXS/2, block_iq3_xxs, VDR_IQ3_XXS_Q8_1_MMVQ, vec_dot_iq3_xxs_q8_1_moe>(
+                 vx_base, vy, ids_dev, dst_base, ncols, nrows, n_experts_used,
+                 expert_weight_stride, dst_row_stride, src1_row_stride, src1_row_div, stream);

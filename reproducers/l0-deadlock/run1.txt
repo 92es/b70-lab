@@ -1,0 +1,53 @@
+build exit=0  cmd.exe : Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331 |     + FullyQualifiedErrorId : NativeCommandError | Intel(R) oneAPI DPC++/C++ Compiler for applications running on Intel(R) 64, Version 2026.0.0 Build 20260331
+=== threads=2 seconds=45 mode=0  00:46:53
+exit=0
+devices=4 threads=2 seconds=45 mode=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=392460  thr1=392196
+   ...
+t=  35s  thr0=2744468  thr1=2741051
+t=  40s  thr0=3132057  thr1=3122834
+t=  45s  thr0=3523064  thr1=3519826
+finished without a hang
+=== threads=4 seconds=60 mode=0  00:47:39
+exit=0
+devices=4 threads=4 seconds=60 mode=0
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=324442  thr1=322811  thr2=321577  thr3=323191
+   ...
+t=  50s  thr0=3307952  thr1=3370542  thr2=3385127  thr3=3374215
+t=  55s  thr0=3635772  thr1=3712028  thr2=3729832  thr3=3709522
+t=  60s  thr0=3965525  thr1=4058501  thr2=4077952  thr3=4047256
+finished without a hang
+=== threads=4 seconds=90 mode=1  00:48:40
+exit=0
+devices=4 threads=4 seconds=90 mode=1
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=420018  thr1=425791  thr2=424683  thr3=425149
+   ...
+t=  80s  thr0=6664669  thr1=6857054  thr2=7011685  thr3=6746473
+t=  85s  thr0=7060509  thr1=7284220  thr2=7444399  thr3=7187887
+t=  90s  thr0=7474527  thr1=7726997  thr2=7879512  thr3=7626179
+finished without a hang
+=== threads=4 seconds=90 mode=2  00:50:11
+exit=0
+devices=4 threads=4 seconds=90 mode=2
+  dev0: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev1: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev2: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+  dev3: Intel(R) Arc(TM) Pro B70 Graphics, driver 1.15.37858
+t=   5s  thr0=217791  thr1=215999  thr2=220479  thr3=208063
+   ...
+t=  80s  thr0=3475381  thr1=3488895  thr2=3483839  thr3=3358015
+t=  85s  thr0=3694508  thr1=3708348  thr2=3699690  thr3=3568831
+t=  90s  thr0=3912895  thr1=3924543  thr2=3921727  thr3=3777599
+finished without a hang

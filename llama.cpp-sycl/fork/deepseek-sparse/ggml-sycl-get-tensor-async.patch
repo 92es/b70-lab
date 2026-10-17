@@ -1,0 +1,23 @@
+# ggml-sycl-get-tensor-async.patch
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- a/ggml/src/ggml-sycl/ggml-sycl.cpp
++++ b/ggml/src/ggml-sycl/ggml-sycl.cpp
+@@ -7266,6 +7266,12 @@
+ 
+     GGML_ASSERT(buf->buft == ggml_backend_sycl_buffer_type(sycl_ctx->device) && "unsupported buffer type");
+     const queue_ptr stream = sycl_ctx->stream(sycl_ctx->device, 0);
++    // Drain the queue before reading (see ggml_backend_sycl_buffer_get_tensor): this is the path that returns logits
++    // and the backend-sampled draft tokens, and a USM copy is not reliably ordered against the kernels queued before it.
++    static const bool wait_first = ggml_sycl_get_env("GGML_SYCL_GET_TENSOR_WAIT", 1) != 0;
++    if (wait_first) {
++        SYCL_CHECK(CHECK_TRY_ERROR((stream)->wait()));
++    }
+     SYCL_CHECK(CHECK_TRY_ERROR((stream)->memcpy(
+         data, (const char *)tensor->data + offset, size)));
+ }

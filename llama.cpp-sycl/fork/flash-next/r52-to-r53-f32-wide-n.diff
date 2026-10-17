@@ -1,0 +1,83 @@
+# r52-to-r53-f32-wide-n.diff
+#
+# Prepared with AI assistance.
+# Derived from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors); see LICENSES/llama.cpp-LICENSE.
+# Base: a local llama.cpp fork tree (upstream master snapshot 66041e + the local changes listed in
+# llama.cpp-sycl/README.md). This is NOT stock upstream: it will not apply to a fresh clone without porting.
+# Status, measured results and the runtime it shipped in: llama.cpp-sycl/README.md.
+#
+--- /dev/fd/63
++++ /dev/fd/62
+@@ -5672,6 +5672,44 @@
+                          });
+ }
+ 
++// Multi-column variant of the wide kernel (verify batches: 2..8 activation columns). One work-group per row, the row
++// is split over the whole group and every column is reduced separately; the weight row is read once for all columns.
++template <int ncols_y>
++static void launch_mul_mat_vec_f32_wide_n(const float * w, const float * y, float * dst, int ncols, int nrows,
++                                          int64_t w_stride, int64_t y_stride, int64_t dst_stride,
++                                          dpct::queue_ptr stream) {
++    constexpr int lanes = GGML_SYCL_F32_MMV_WIDE_SG * WARP_SIZE;
++    const sycl::range<3> block_dims(1, GGML_SYCL_F32_MMV_WIDE_SG, WARP_SIZE);
++    const sycl::range<3> block_nums(1, 1, nrows);
++    const int n4 = ncols / 4;
++    stream->parallel_for(sycl::nd_range<3>(block_nums * block_dims, block_dims),
++                         [=](sycl::nd_item<3> item) [[sycl::reqd_sub_group_size(WARP_SIZE)]] {
++                             const int row  = item.get_group(2);
++                             const int lane = item.get_local_id(1) * WARP_SIZE + item.get_local_id(2);
++                             const sycl::float4 * w4 = reinterpret_cast<const sycl::float4 *>(w + (int64_t) row * w_stride);
++                             float sum[ncols_y];
++#pragma unroll
++                             for (int j = 0; j < ncols_y; ++j) {
++                                 sum[j] = 0.0f;
++                             }
++                             for (int c = lane; c < n4; c += lanes) {
++                                 const sycl::float4 wv = w4[c];
++#pragma unroll
++                                 for (int j = 0; j < ncols_y; ++j) {
++                                     const sycl::float4 yv = reinterpret_cast<const sycl::float4 *>(y + j * y_stride)[c];
++                                     sum[j] += wv.x() * yv.x() + wv.y() * yv.y() + wv.z() * yv.z() + wv.w() * yv.w();
++                                 }
++                             }
++#pragma unroll
++                             for (int j = 0; j < ncols_y; ++j) {
++                                 const float total = sycl::reduce_over_group(item.get_group(), sum[j], sycl::plus<float>());
++                                 if (lane == 0) {
++                                     dst[row + j * dst_stride] = total;
++                                 }
++                             }
++                         });
++}
++
+ static void ggml_sycl_mul_mat_vec_f32(ggml_backend_sycl_context & ctx, const ggml_tensor * src0, const ggml_tensor * src1,
+                                       ggml_tensor * dst) {
+     const float * w = (const float *) src0->data;
+@@ -5691,6 +5729,27 @@
+         launch_mul_mat_vec_f32_wide(w, y, d, ncols, nrows, w_stride, stream);
+         return;
+     }
++    // Multi-column activations (MTP / draft verify batches): split each row over a work-group as well. Few rows with a
++    // long reduction (hc inject 4 x 10240, ssm alpha/beta 48 x 2560, shared-expert gate 1 x 2560) otherwise run on a
++    // handful of sub-groups. GGML_SYCL_F32_MMV_WIDE_N=0 disables; _WIDE_SMALL_ROWS / _SMALL_MIN_COLS tune the small case.
++    static const bool wide_n_enabled = ggml_sycl_get_env("GGML_SYCL_F32_MMV_WIDE_N", 1) != 0;
++    static const int  wide_small_rows = ggml_sycl_get_env("GGML_SYCL_F32_MMV_WIDE_SMALL_ROWS", 64);
++    static const int  wide_small_cols = ggml_sycl_get_env("GGML_SYCL_F32_MMV_WIDE_SMALL_MIN_COLS", 2048);
++    const bool wide_shape = (wide_min_cols > 0 && ncols >= wide_min_cols) ||
++                            (wide_small_rows > 0 && nrows <= wide_small_rows && ncols >= wide_small_cols);
++    if (wide_n_enabled && vec4 && wide_shape && src1->ne[1] >= 1) {
++        switch (src1->ne[1]) {
++            case 1: launch_mul_mat_vec_f32_wide_n<1>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 2: launch_mul_mat_vec_f32_wide_n<2>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 3: launch_mul_mat_vec_f32_wide_n<3>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 4: launch_mul_mat_vec_f32_wide_n<4>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 5: launch_mul_mat_vec_f32_wide_n<5>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 6: launch_mul_mat_vec_f32_wide_n<6>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 7: launch_mul_mat_vec_f32_wide_n<7>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            case 8: launch_mul_mat_vec_f32_wide_n<8>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, stream); return;
++            default: break;
++        }
++    }
+     switch (src1->ne[1]) {
+         case 1: launch_mul_mat_vec_f32<1>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, vec4, stream); break;
+         case 2: launch_mul_mat_vec_f32<2>(w, y, d, ncols, nrows, w_stride, y_stride, dst_stride, vec4, stream); break;
