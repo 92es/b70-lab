@@ -33,7 +33,7 @@ live, staged, rejected or an open bug. [CHANGELOG.md](CHANGELOG.md) has the date
 | [deepseek-v4/](deepseek-v4/) | DeepSeek V4 Flash: IQ2_XS/IQ3_XXS MoE kernel, DSpark drafting, sparse attention at depth | live |
 | [glm-5.3/](glm-5.3/) | GLM-5.3-Flash (321B MoE) brought into the fork: 16.5 -> 24-25 tok/s | live |
 | [gpt-oss/](gpt-oss/) | gpt-oss-120b: MXFP4 reorder, 3-card layer split, cross-card pipeline | live; MXFP4 work merged upstream |
-| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | works with fp16 KV; int8 KV gives wrong answers (open) |
+| [strata-windows-port/](strata-windows-port/) | Native Windows port of the Strata engine; Level Zero has no peer access between B70s on Windows | works: 2 cards, int8 KV, JIT build, 108 tok/s (an AOT miscompile caused the earlier wrong answers) |
 | [reproducers/](reproducers/) | Standalone programs: Level Zero multi-thread submission deadlock, Windows peer-access probe | deadlock still present on driver 8976; not yet reported to Intel |
 | [bench/](bench/) | Benchmark scripts and how to compare fairly | |
 | [rejected-ideas/](rejected-ideas/) | Things that did not help, with numbers | |
@@ -52,8 +52,8 @@ live, staged, rejected or an open bug. [CHANGELOG.md](CHANGELOG.md) has the date
 - Speculative decoding numbers depend on the text: copy-heavy output (edits, reformatting) accepts far more
   drafts than fresh prose. Where it matters the tables give both.
 - Correctness was checked with `test-backend-ops` against the CPU backend, perplexity / KL divergence, and
-  fixed-answer prompts. A speed number without a correctness check is not worth much: the int8-KV Strata run in
-  [strata-windows-port/](strata-windows-port/) was 96 tok/s and produced garbage.
+  fixed-answer prompts. A speed number without a correctness check is not worth much: the miscompiled int8-KV Strata
+  build in [strata-windows-port/](strata-windows-port/) ran at 96 tok/s and produced garbage.
 
 ## Adding a new result
 

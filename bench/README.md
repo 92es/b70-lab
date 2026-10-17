@@ -24,6 +24,8 @@ repo (the original prompt was replaced). The other six prompts are the same; exp
   whether a decode step had already run).
 - **Enough samples.** Run-to-run noise on a single prompt was +-1.5 tok/s for Flash-Next; a single-prompt "+17%" did
   not replicate on a varied set. The Flash-Next decode tables use 28-42 samples per arm over 7 prompts.
+- **A speed number only counts after an answer check.** A miscompiled Strata build produced garbage at 96.6 "tok/s":
+  the MTP draft predicted the garbage well, so acceptance and tok/s went up. Run `squal.py` first.
 - **Check answers, not just speed.** Fixed-answer prompts (`squal.py`), `test-backend-ops` against the CPU backend for
   kernels, and perplexity / KL divergence for anything that changes numerics.
 - **Batch-1 perplexity is the exactness test.** `llama-perplexity -ub 8` is deterministic on this backend; batched

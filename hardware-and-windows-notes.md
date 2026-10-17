@@ -40,6 +40,9 @@ load and my RAM watchdog killed the server. Observed for llama.cpp's Flash-Next,
 - The AOT build failed with "IGC: Internal Compiler Error" while a large model was loaded: the GPU compiler needs
   VRAM. Unload models before building.
 - Executables die with `0xC00004BC` if the oneAPI runtime DLLs are not on `PATH` or next to them.
+- AOT can miscompile: oneAPI 2026.0's `ocloc` AOT build for `bmg-g31` produced wrong results in Strata's batched
+  int8 attention, while the same sources JIT-compiled by the driver (32.0.101.8976) were bitwise correct. When a
+  kernel's output is wrong and the code looks right, try a JIT build. See [strata-windows-port/](strata-windows-port/).
 - After a Level Zero SDK update (1.28.2 -> 1.32.0) CMake's cached paths had to be fixed by hand.
 
 ## Level Zero on Windows

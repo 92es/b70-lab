@@ -5,12 +5,16 @@ machine (see [README](README.md)); the details link says which model file, runti
 each status. History of changes: [CHANGELOG.md](CHANGELOG.md).
 
 Status: **live** (running every day), **staged** (built and measured, not switched on), **upstream** (merged or in
-review in llama.cpp), **rejected**, **open bug**.
+review in llama.cpp), **rejected**, **open bug**, **fixed**, **superseded**.
+
+A speed number only counts after an answer check: the broken Strata AOT build produced garbage, the MTP draft
+predicted the garbage easily, and acceptance inflated tok/s (96.6 "tok/s" that meant nothing).
 
 | Item | Model | Gain / loss (numbers) | Status | Date | Details |
 |---|---|---|---|---|---|
-| Strata Windows port, 2 cards, fp16 KV | Qwen3.8-Flash-Next IQ3_XXS | 67.4 tok/s, answers correct, vs llama.cpp r62 4 cards 60.6 (+11%); prompt 570 vs 748 tok/s; decode after long prompt 46.4 vs 28.6 | staged | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
-| Strata int8 KV on Windows | Qwen3.8-Flash-Next IQ3_XXS | wrong answers (2 cards and 1 card); its 96.6 tok/s is invalid | open bug | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
+| Strata Windows port, 2 cards, int8 KV, JIT build (200k x 2 slots, MTP depth 4) | Qwen3.8-Flash-Next IQ3_XXS | 108.2 tok/s vs llama.cpp r62 on 4 cards (UD-Q4_K_XL) 60.6 (+79%); prompt read 599 vs 748 tok/s at 33.6k (-20%); decode after that prompt 58.7 vs 28.6 (2.0x); answers correct, identical to llama.cpp on 4 check prompts. Different quant | staged | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
+| Strata int8 KV wrong answers on Windows | Qwen3.8-Flash-Next IQ3_XXS | cause: AOT miscompile of batched int8 decode attention (oneAPI 2026.0); fixed by a JIT build (patch 0003) | fixed | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
+| Strata Windows port, 2 cards, fp16 KV, 32k | Qwen3.8-Flash-Next IQ3_XXS | 67.4 tok/s, answers correct, vs 60.6 (+11%); prompt 570 vs 748 tok/s | superseded (by int8 + JIT) | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
 | Level Zero multi-thread submit + oneMKL deadlock | - | 5 of 6 runs hang on driver 8976 (4 threads, warm-up) | open bug (driver) | 2026-10-11 | [reproducers](reproducers/) |
 | GLM-5.3 Maya-M in the SYCL fork (g10) + MTP n4 / p0.75 | GLM-5.3-Flash Maya-M | 16.5 -> 24-25 tok/s prose (+50%), 33-35 on edits; perplexity equal to upstream | live | 2026-10-14 | [glm-5.3](glm-5.3/) |
 | GLM-5.3 cross-card pipeline | GLM-5.3-Flash Maya-M | long-prompt read ~240 -> 330-370 tok/s (+43%) | live | 2026-10-14 | [glm-5.3](glm-5.3/) |
@@ -30,6 +34,7 @@ review in llama.cpp), **rejected**, **open bug**.
 | MXFP4 SWAR decode + MoE reorder ([#29809](https://github.com/ggml-org/llama.cpp/pull/29809)) | gpt-oss-20b / 120b | 55.8 -> 106.6 / 33.3 -> 67.1 | upstream (merged) | 2026-10-10 | [gpt-oss](gpt-oss/) |
 | Pinned `-sm tensor` all-reduce ([#29604](https://github.com/ggml-org/llama.cpp/pull/29604)) | Qwen3.8-27B Q8_0 (2 cards) | tensor prompt +37-45%, decode 18.2 -> 20.2 | upstream (merged) | 2026-09-30 | [llama.cpp-sycl](llama.cpp-sycl/) |
 | Q8_0 16-byte loads, Q8_0 GLU fusion, ADD+RMS fusion, FA split 48 | Qwen3.8-27B Q8_0 (2 cards) | 15.42 -> 17.47 short; FA split +4.5-6.2% at depth | staged (patches) | 2026-09-27 | [llama.cpp-sycl](llama.cpp-sycl/) |
+| Strata AOT build (oneAPI 2026.0 ocloc, bmg-g31) | Qwen3.8-Flash-Next IQ3_XXS | int8 batched decode attention miscompiled (parity: half the outputs wrong incl. inf); its 96.6 tok/s was invalid. `-ze-opt-greater-than-4GB-buffer-required` does not help | rejected | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
 | Grouped expert verification | Qwen3.8-Flash-Next | -5 to -10% | rejected | 2026-10-15 | [rejected-ideas](rejected-ideas/) |
 | GLM hc-gate fusion | GLM-5.3-Flash | +1%, perplexity 5.5565 -> 5.6031 | rejected | 2026-10-14 | [rejected-ideas](rejected-ideas/) |
 | `-sm tensor` for GLM-5.3 | GLM-5.3-Flash | 4.8 tok/s (vs 24-25 layer split) | rejected | 2026-10-13 | [rejected-ideas](rejected-ideas/) |
