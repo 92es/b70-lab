@@ -4,6 +4,7 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-16 (late)
+- Parked plan added: Strata-style expert parallelism for DeepSeek V4 Flash ([plan](deepseek-v4/PLAN-expert-parallel.md)).
 - Strata int8 KV bug on Windows solved: oneAPI 2026.0's AOT build (`ocloc`, `bmg-g31`) miscompiles the batched
   decode attention over int8 KV; the same sources JIT-compiled by the driver pass parity bitwise. Patch 0003 adds a
   JIT build switch. Strata 2 cards, int8 KV, 200k x 2 slots: 108.2 tok/s vs llama.cpp r62 on 4 cards 60.6 (+79%),

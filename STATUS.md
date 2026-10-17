@@ -5,13 +5,14 @@ machine (see [README](README.md)); the details link says which model file, runti
 each status. History of changes: [CHANGELOG.md](CHANGELOG.md).
 
 Status: **live** (running every day), **staged** (built and measured, not switched on), **upstream** (merged or in
-review in llama.cpp), **rejected**, **open bug**, **fixed**, **superseded**.
+review in llama.cpp), **rejected**, **open bug**, **fixed**, **superseded**, **planned (parked)**.
 
 A speed number only counts after an answer check: the broken Strata AOT build produced garbage, the MTP draft
 predicted the garbage easily, and acceptance inflated tok/s (96.6 "tok/s" that meant nothing).
 
 | Item | Model | Gain / loss (numbers) | Status | Date | Details |
 |---|---|---|---|---|---|
+| Expert parallelism for DeepSeek V4 Flash (Strata-style, all cards work on every token) | DeepSeek V4 Flash | none yet; bounded by the expert-matmul share of a decode step (step 1 measures it). Now: ~30 tok/s DSpark on long documents, 21-24 at 59k | planned (parked) | 2026-10-16 | [plan](deepseek-v4/PLAN-expert-parallel.md) |
 | Strata Windows port, 2 cards, int8 KV, JIT build (200k x 2 slots, MTP depth 4) | Qwen3.8-Flash-Next IQ3_XXS | 108.2 tok/s vs llama.cpp r62 on 4 cards (UD-Q4_K_XL) 60.6 (+79%); prompt read 599 vs 748 tok/s at 33.6k (-20%); decode after that prompt 58.7 vs 28.6 (2.0x); answers correct, identical to llama.cpp on 4 check prompts. Different quant | staged | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
 | Strata int8 KV wrong answers on Windows | Qwen3.8-Flash-Next IQ3_XXS | cause: AOT miscompile of batched int8 decode attention (oneAPI 2026.0); fixed by a JIT build (patch 0003) | fixed | 2026-10-16 | [strata-windows-port](strata-windows-port/) |
 | Strata Windows port, 2 cards, fp16 KV, 32k | Qwen3.8-Flash-Next IQ3_XXS | 67.4 tok/s, answers correct, vs 60.6 (+11%); prompt 570 vs 748 tok/s | superseded (by int8 + JIT) | 2026-10-16 | [strata-windows-port](strata-windows-port/) |

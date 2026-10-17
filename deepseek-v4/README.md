@@ -8,6 +8,7 @@ token), compressed sparse attention + "lightning indexer", 1M training context.
   model has IQ gate/up experts.
 - Draft model: `dspark-DeepSeek-V4-Flash-0731-Q8_0.gguf` (10.9 GB) from the same repo, for DSpark speculative decoding.
 - Status: **live** on fork runtime `r52`, 131k context with DSpark.
+- Next idea (parked): expert parallelism across the 4 cards, see [PLAN-expert-parallel.md](PLAN-expert-parallel.md).
 
 Main flags (reconstructed from my notes; the fork-only switches are explained in [../llama.cpp-sycl/](../llama.cpp-sycl/)):
 
