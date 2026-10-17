@@ -4,6 +4,9 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-17
+- DeepSeek plan updated: Track A = expert parallelism for V4 Flash 0731 in the llama.cpp fork (go / no-go after a
+  1-hour profile); Track B = DeepSeek V4.1 Flash 1017 (released today, new ~510B architecture, not in llama.cpp yet),
+  watching for support ([plan](deepseek-v4/PLAN-expert-parallel.md)).
 - Quant quality: GSQ-RCO IQ3_S perplexity +1.0% / mean KLD 0.131 / same top token 88.4% vs IQ3_XXS +3.5% / 0.211 /
   85.3% (reference UD-Q4_K_XL).
 - New best Strata setup: IQ3_S, 2 cards, 1 x 200k, int8 KV, prefill chunk 8192, JIT: decode 97.6 tok/s (+61% vs

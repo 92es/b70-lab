@@ -1,51 +1,84 @@
-# Plan: expert parallelism for DeepSeek V4 Flash (parked)
+# Plan: Strata-style speed for DeepSeek (updated 2026-10-17)
 
-Status: **planned, parked** (2026-10-16). No code yet and no gain promised until step 1 is done.
+Status: **Track A planned (parked until step A0)**, **Track B planned (waiting for llama.cpp support)**. No code yet
+and no gain promised until A0 is measured. Results will go into [../STATUS.md](../STATUS.md) as they land.
 
-## Idea
+## Why
 
-Bring Strata-style expert parallelism to DeepSeek V4 Flash in the llama.cpp SYCL fork.
+Strata runs Qwen3.8-Flash-Next on **2 B70s** at ~98 tok/s decode and ~1,400 tok/s prompt read (112k-token prompt),
+against the tuned llama.cpp fork on **4 cards** at ~61 / ~750 ([../strata-windows-port/](../strata-windows-port/)).
+The main design difference is **expert parallelism**: every card computes its share of each layer's experts for
+every token, at the same time. The fork splits models **by layers**, so during single-token decode only one of the
+4 cards works at any moment (each idle ~75% of the time). The fork's cross-card pipeline helps prompt reading
+(batches), not decode.
 
-- Strata decodes Qwen3.8-Flash-Next at 108.2 tok/s on 2 cards ([../strata-windows-port/](../strata-windows-port/)).
-  Every card computes its share of each layer's experts for every token, so both cards work all the time.
-- The fork splits DeepSeek V4 by layers over 4 cards. During single-token decode only one card works at a time, so
-  each card sits idle up to ~75% of a decode step.
-- The fork's cross-card pipeline overlaps cards for prompt reading (many tokens in flight), not for single-token
-  decode.
+Other Strata ingredients: all experts resident in VRAM; one captured graph per decode step (near-zero launch cost);
+model-specific fused kernels; MTP drafting; int8 KV. Part of its edge is also its smaller quant (IQ3_S / IQ3_XXS).
 
-## Where DeepSeek V4 Flash is now
+## Two targets
 
-UD-Q2_K_XL, 4x B70, fork r52 + cross-card pipeline, DSpark draft (details in [README.md](README.md)):
+| | DeepSeek V4 Flash 0731 (running now) | **DeepSeek V4.1 Flash 1017 (released 2026-10-17)** |
+|---|---|---|
+| Architecture | `DeepseekV4ForCausalLM`, supported in llama.cpp and the fork | **new** `DeepseekV41ForCausalLM`, not in llama.cpp yet |
+| Size | ~280B; UD-Q2_K_XL 90 GB fits 4 cards | **~510B** (510 GB FP8): hidden 5120, 384 experts x 2304, 40 layers |
+| New parts | - | "engram" n-gram memory layers (layers 1, 14), KV shared across layers, new compressed-attention ratios, 3 MTP layers, built-in DSpark draft, vision tower |
+| On the test machine (4x B70, 128 GB VRAM) | ~30 tok/s on long-document work (DSpark), 21-24 at 59k; prompt ~450 tok/s at 59k | cannot run (no llama.cpp support); ~2.7 bits/weight would be ~170 GB > 128 GB VRAM |
+| License | MIT | MIT |
 
-| Measure | Now |
-|---|---|
-| Decode on long-document work (DSpark) | ~30 tok/s |
-| Decode at 59k context | 21-24 tok/s |
-| Prompt read | ~450 tok/s at 59k, ~400 at 102k |
+## Track A: expert parallelism for V4 Flash 0731 in the llama.cpp fork (first)
 
-## Step 1: measure the ceiling (about an hour; decides whether to continue)
+**A0. Measure the ceiling (~1 h, decides go / no-go).** `GGML_SYCL_PROFILE_OPS=1` on one decode step (plain and
+DSpark): share of time in the expert matmuls (`MUL_MAT_ID`) vs attention / dense / other, and per-card busy / idle.
+Upper bound: if experts are E% of the step and 4 cards share them, step time -> (1 - E) + E/4 (+ exchange cost).
+Go if the bound is >= 1.4x.
 
-Profile one decode step per op (`GGML_SYCL_PROFILE_OPS=1`) and measure:
+**A1. Design (~0.5 day).**
+- Placement: card 0 keeps everything non-expert (attention, dense, router, KV) plus a quarter of the experts; cards
+  1-3 each hold a quarter of every layer's experts. Strata's 2-card split is the template.
+- Per layer per token: card 0 routes and pushes the token's hidden state (4096 x fp16 = 8 KB) to the other cards;
+  each card computes its routed experts; partial sums return and are added on card 0.
+- Windows has no peer access between B70s, so the exchange goes through host memory in **one shared SYCL context**
+  (as in Strata Windows patch `0002`), with device-side spinning on system-scope flags. Measured host round trip incl.
+  launches ~57 us; the device-spin path should be well under that. 43 layers x ~10-30 us = 0.4-1.3 ms per token,
+  against ~33 ms per token today.
+- In the code: a new MoE split mode in the fork (expert tensors split by expert range across devices), either in the
+  SYCL `MUL_MAT_ID` path or as per-device partial MoE nodes in the DeepSeek graph builder plus a final add.
 
-- the share of step time in the routed-expert matmuls (`MUL_MAT_ID`), and
-- the idle time per card.
+**A2. Build (multi-day).** Prototype without a draft model first, then DSpark verify batches (several tokens per step,
+which is where Strata's batched kernels matter). Behind an environment switch, default off.
 
-Only expert work splits across cards, so the expert share bounds the possible gain. If it is small, stop here.
+**A3. Validate.** Perplexity equal to the current fork; answer checks ([../bench/squal.py](../bench/)); a replay of
+real long-document requests; a soak. Compare decode at 7k / 59k / 102k context against the current setup.
 
-## Step 2: expert-parallel MoE in the fork (multi-day)
+**Risks.** The ggml scheduler assumes layer placement; host-memory exchange latency under load; the prompt path
+already uses the cross-card pipeline and expert parallelism must not regress it. And from the Strata AOT miscompile:
+check answers, not just speed.
 
-- Each card holds a share of every layer's experts and computes them for every token; partial results are combined
-  per layer.
-- On Windows there is no IPC or peer access between B70s, so the card-to-card exchange goes through host memory
-  inside one shared SYCL context, as in the Strata Windows port (patch `0002`). Strata shows this works at speed on
-  these cards.
-- Validate like every other change here: `test-backend-ops`, perplexity equal to the layer-split build, fixed-answer
-  prompts, then decode A/B on the same harness.
+## Track B: DeepSeek V4.1 Flash 1017 (prepare, don't build yet)
+
+**B0. Watch for llama.cpp support** of the new architecture (engram layers, KV sharing, new compression, 3-layer MTP).
+Until it lands upstream, nothing built here can load it. Community GGUFs in custom formats need matching code.
+
+**B1. Size plan once supported.** ~510B parameters: ~170 GB at ~2.7 bits/weight. The test machine has 128 GB VRAM
+and 112 GB system RAM. Options: split experts between VRAM and RAM (hot experts resident, cold experts streamed or
+computed on the CPU, as Strata / ktransformers do), or a ~2-bit quant if quality holds (KLD check against a higher
+quant, as done for Flash-Next).
+
+**B2. Reuse Track A.** Expert parallelism across 4 cards plus an expert cache for what does not fit is the same
+machinery; Track A builds and validates it on a model that already works.
+
+**B3. Quality first.** Before any speed work, compare V4.1 at the chosen quant with V4 0731 on a fixed task set, since
+the release claims shorter outputs and better benchmarks.
+
+## Order and decision points
+
+1. A0 profile (1 h) -> go / no-go for Track A.
+2. If go: A1 design note, then A2 prototype without a draft model.
+3. In parallel, B0: check upstream for V4.1 support weekly.
+4. When V4.1 loads in llama.cpp: B1 size / quant study, then decide whether to move from V4 0731 to V4.1.
 
 ## Caveats
 
-- Part of Strata's speed may come from its smaller quant (IQ3_XXS, ~27% fewer bytes than UD-Q4_K_XL) and from
-  model-specific fused kernels, not only from parallelism.
-- DeepSeek V4's attention (compressed sparse attention + indexer) and the DSpark draft stay as they are; only the
-  MoE part changes.
-- No number is promised until step 1.
+- Part of Strata's speed may come from its smaller quant and model-specific fused kernels, not only from parallelism.
+- DeepSeek V4's attention (compressed sparse attention + indexer) and the DSpark draft stay as they are in Track A;
+  only the MoE part changes.
