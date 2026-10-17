@@ -110,6 +110,24 @@ IQ3_S, 1 x 200k, 2 cards, 7-prompt mean over 2 rounds:
 
 No setting beats the defaults beyond run-to-run noise.
 
+## 2 slots vs 1 slot (IQ3_S)
+
+IQ3_S, `--ple-io mmap`, 2 cards. Concurrency harness: 4 prompts x 512 tokens, second round counted. This harness
+gives lower single-stream numbers than the 7-prompt set (~73-77 vs ~99 tok/s); compare within the table only.
+
+| | 2 slots x 112k, prompt chunk 4096 | 1 slot x 200k, prompt chunk 8192 (default) |
+|---|---|---|
+| 1 stream, decode | 77.3 | 72.6 |
+| 2 concurrent streams, per stream | 60.8 + 53.0 | 72.9 + 77.7 (served in turn) |
+| 2 concurrent streams, aggregate | **82.2 tok/s** | 70.2 tok/s |
+| Prompt read @ 33.6k | 889 tok/s | **1,421 tok/s** |
+
+2 x 112k with prompt chunk 8192 does not fit (card 1 needs 31.38 of 30.16 GiB).
+
+**Decision: keep 1 x 200k as the default.** Two slots only pay when requests overlap (+17% aggregate, each stream
+~25% slower), and they always cost 37% of prompt speed and 88k of context. If two clients often overlap, a second
+server entry with the 2-slot config is an option.
+
 ## 2-hour soak through llama-swap (2026-10-17)
 
 IQ3_S, 1 x 200k, int8 KV, prompt chunk 8192, JIT build, 2 cards, vision on, served through llama-swap. Each cycle:
