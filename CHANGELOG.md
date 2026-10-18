@@ -4,6 +4,8 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-18
+- r67c also live for DeepSeek V4 (no draft; DSpark + lookup), Qwen3.8-27B Q8_0 and Q6_K, and Flash-Next MTP + lookup;
+  answer checks pass on every switched entry. Only GLM-5.3 and the plain Flash-Next MTP entry stay on older runtimes.
 - r67c switched live for DeepSeek V4 Flash DSpark and gpt-oss-120b (smoke: 20.7k-token prompt read at 651 tok/s,
   answers correct). GLM-5.3 and the Flash-Next llama.cpp entry stay on their old runtimes (neutral).
 
