@@ -4,6 +4,10 @@ Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topi
 changed and when.
 
 ## 2026-10-17
+- llama.cpp fork rebased onto upstream master of 2026-10-17 (r67c, staged): DeepSeek V4 prompt read +36% at 33.6k and
+  decode +5%, gpt-oss-120b decode +7%, GLM-5.3 and Flash-Next neutral; answers correct and perplexity equal on all
+  four. Upstream's Q5_K kernel and Flash-Next MTP head replace the fork's; two local fixes let the MTP head load from
+  a shared-weights draft file ([notes](llama.cpp-sycl/REBASE-2026-10-17.md)).
 - Strata Windows patch set complete (0001-0004; 0004 = optional timer-resolution switch, no measured effect); a
   how-to-run recipe (JIT build, config essentials, CPU vision encoder, llama-swap entry) in strata-windows-port/.
   Current best for Flash-Next recorded at the top of STATUS.md.
