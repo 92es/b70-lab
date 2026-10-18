@@ -20,6 +20,9 @@ predicted the garbage easily, and acceptance inflated tok/s (96.6 "tok/s" that m
 
 | Item | Model | Gain / loss (numbers) | Status | Date | Details |
 |---|---|---|---|---|---|
+| Fork rebased onto upstream (r67c), more entries | Qwen3.8-27B Q8_0 / Q6_K, DeepSeek V4 no-draft / DSpark+lookup, Flash-Next MTP+lookup | 27B decode +3% / +6%, prompt +23% / +11%, perplexity equal; DeepSeek prompt +43% / +37%; Flash-Next lookup decode +14%; answers correct | staged | 2026-10-18 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
+| SYCL f16 MUL_MAT on a padded row view (test-backend-ops `k_v` cases) | - | 32 cases wrong (ERR ~1-2) on r52, r66 and r67c alike; not hit by the models tested (FA on) | open bug | 2026-10-18 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
+| SYCL SWIGLU_OAI advertised for f16 but kernel asserts f32 | - | test-backend-ops aborted; fixed locally by limiting support to f32 (gpt-oss uses f32) | fixed (locally) | 2026-10-18 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
 | Fork rebased onto upstream llama.cpp 2026-10-17 (r67c) | DeepSeek V4 Flash 0731 (DSpark) | prompt read at 33.6k 512 -> 699 tok/s (+36%), at 107k 425 -> 570 (+34%); decode 28.8 -> 30.2 (+5%), at 107k 23.1 -> 26-28; 50-min soak clean; perplexity equal (16 chunks 6.463 vs 6.479); answers correct | live | 2026-10-18 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
 | Fork rebased onto upstream llama.cpp 2026-10-17 (r67c) | gpt-oss-120b | decode 54.2 -> 57.8 (+7%); short prompts +9%; 26k-85k prompts flat (-2% at 85k); 30-min soak clean; perplexity identical; answers correct | live | 2026-10-18 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
 | Fork rebased onto upstream llama.cpp 2026-10-17 (r67c) | GLM-5.3-Flash Maya-M | decode 21.9 -> 22.5 (+3%); prompt flat; perplexity identical (5.5716 / 5.5946); one runtime instead of a separate GLM branch | staged | 2026-10-17 | [rebase notes](llama.cpp-sycl/REBASE-2026-10-17.md) |
