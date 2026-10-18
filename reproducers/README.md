@@ -12,6 +12,9 @@ I hit it in my cross-card pipeline for llama.cpp (one worker thread per GPU; sto
 and is not affected). The workaround there is one lock around **all** kernel submissions from all threads, released
 while waiting on events. Serialising only the gemm calls was not enough.
 
+Reported to Intel on 2026-10-17: [Intel Community forum post](https://community.intel.com/t/144119) (driver) and
+[intel/llvm#23530](https://github.com/intel/llvm/issues/23530) (SYCL runtime / Level Zero v2 adapter).
+
 System: 4x Arc Pro B70, EPYC 7402P, Windows 11 Pro 26200, oneAPI DPC++ 2026.0.0 (build 20260331), oneMKL 2026.0,
 UR Level Zero v2 adapter.
 
