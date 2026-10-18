@@ -4,6 +4,8 @@ Notes, patches, reproducers and benchmark numbers from running large local LLMs 
 under Windows 11. I'm sharing them so other Arc users can reuse what was debugged here, and so the numbers
 (including the ideas that did not work) are in one place.
 
+Highlights thread on X (2026-10-17): [Strata on 2x Arc Pro B70 under Windows](https://x.com/realjstaples/status/2111636473334157775).
+
 This is a personal lab notebook, not a product. Everything was measured on one machine; your results on other
 Arc cards, other drivers or Linux may differ.
 
