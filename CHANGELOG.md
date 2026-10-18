@@ -3,6 +3,10 @@
 Dated entries, newest first. Results go into [STATUS.md](STATUS.md) and the topic folder; this file records what
 changed and when.
 
+## 2026-10-18
+- r67c switched live for DeepSeek V4 Flash DSpark and gpt-oss-120b (smoke: 20.7k-token prompt read at 651 tok/s,
+  answers correct). GLM-5.3 and the Flash-Next llama.cpp entry stay on their old runtimes (neutral).
+
 ## 2026-10-17
 - llama.cpp fork rebased onto upstream master of 2026-10-17 (r67c, staged): DeepSeek V4 prompt read +36% at 33.6k and
   decode +5%, gpt-oss-120b decode +7%, GLM-5.3 and Flash-Next neutral; answers correct and perplexity equal on all
